@@ -1,7 +1,13 @@
+/** User identification (not auth — internal network) */
+const USER_KEY = 'devops_v2_user';
+export function getUsername() { return localStorage.getItem(USER_KEY) || ''; }
+export function setUsername(name) { localStorage.setItem(USER_KEY, (name || '').trim()); }
+
 /** Generic JSON fetch helper */
 export async function api(path, options = {}) {
+  const user = getUsername();
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
     ...options,
   });
   if (!res.ok) {
@@ -27,9 +33,10 @@ export function post(path, body) {
  * Resolves when the stream ends.
  */
 export async function postSse(path, body, { onEvent, signal } = {}) {
+  const user = getUsername();
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...(user ? { 'X-User': user } : {}) },
     body: JSON.stringify(body),
     signal,
   });

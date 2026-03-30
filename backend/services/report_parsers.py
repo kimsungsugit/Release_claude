@@ -555,37 +555,19 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
     xlsx_files = [item for item in files if item.get("ext") == "xlsx"]
     json_files = [item for item in files if item.get("ext") == "json"]
 
-    parsed_html = [
-        parse_html_report(root_dir / item["rel_path"])
-        for item in html_files[:6]
-        if item.get("rel_path")
-    ]
-    parsed_xlsx = [
-        parse_xlsx_report(root_dir / item["rel_path"])
-        for item in xlsx_files[:3]
-        if item.get("rel_path")
-    ]
-    parsed_json = [
-        parse_json_report(root_dir / item["rel_path"])
-        for item in json_files[:5]
-        if item.get("rel_path")
-    ]
+    # Lazy: only parse when analysis_summary is missing (first time)
+    # These are used for artifacts detail in the response
+    if analysis_summary:
+        parsed_html = [{"path": str(root_dir / item["rel_path"]), "title": item.get("rel_path", "")} for item in html_files[:6] if item.get("rel_path")]
+        parsed_xlsx = [{"path": str(root_dir / item["rel_path"]), "sheets": [], "rows": 0} for item in xlsx_files[:3] if item.get("rel_path")]
+        parsed_json = [{"path": str(root_dir / item["rel_path"]), "keys": []} for item in json_files[:5] if item.get("rel_path")]
+    else:
+        parsed_html = [parse_html_report(root_dir / item["rel_path"]) for item in html_files[:6] if item.get("rel_path")]
+        parsed_xlsx = [parse_xlsx_report(root_dir / item["rel_path"]) for item in xlsx_files[:3] if item.get("rel_path")]
+        parsed_json = [parse_json_report(root_dir / item["rel_path"]) for item in json_files[:5] if item.get("rel_path")]
 
     report_types: Dict[str, int] = {}
-    for item in html_files:
-        rel = item.get("rel_path")
-        if not rel:
-            continue
-        parsed = parse_html_report(root_dir / rel)
-        kind = _classify_report_type(rel, parsed.get("title"))
-        report_types[kind] = report_types.get(kind, 0) + 1
-    for item in xlsx_files:
-        rel = item.get("rel_path")
-        if not rel:
-            continue
-        kind = _classify_report_type(rel)
-        report_types[kind] = report_types.get(kind, 0) + 1
-    for item in json_files:
+    for item in html_files + xlsx_files + json_files:
         rel = item.get("rel_path")
         if not rel:
             continue
@@ -605,8 +587,21 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
         job_slug=job_slug,
     ) if prqa_rcr_path else {}
     prqa_metrics = prqa_rcr.get("metrics", {}) if isinstance(prqa_rcr, dict) else {}
+    # Fallback: use analysis_summary.json prqa data when HTML parsing found nothing
+    if not prqa_metrics and isinstance(analysis_summary, dict):
+        as_prqa = analysis_summary.get("prqa", {})
+        if isinstance(as_prqa, dict):
+            rcr_summary = as_prqa.get("rcr", {}).get("summary", {}) if isinstance(as_prqa.get("rcr"), dict) else {}
+            if rcr_summary:
+                prqa_metrics = rcr_summary
     prqa_hmr_path = next((root_dir / item["rel_path"] for item in xlsx_files if "_HMR_" in item.get("rel_path", "")), None)
     prqa_hmr = parse_xlsx_report(prqa_hmr_path) if prqa_hmr_path else {}
+    # Fallback HMR stats from analysis_summary
+    as_hmr_stats = {}
+    if isinstance(analysis_summary, dict):
+        as_prqa = analysis_summary.get("prqa", {})
+        if isinstance(as_prqa, dict) and isinstance(as_prqa.get("hmr"), dict):
+            as_hmr_stats = as_prqa["hmr"].get("stats", {})
 
     vcast_metrics_path = next((root_dir / item["rel_path"] for item in html_files if "metrics_report" in item.get("rel_path", "").lower()), None)
     vcast_metrics = parse_vectorcast_metrics_summary(vcast_metrics_path) if vcast_metrics_path else {}
@@ -617,6 +612,8 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
 
     safe_coverage = coverage if isinstance(coverage, dict) else {}
     safe_tests = tests if isinstance(tests, dict) else {}
+    # code_metrics from analysis_summary
+    code_metrics = analysis_summary.get("code_metrics", {}) if isinstance(analysis_summary, dict) else {}
 
     summary: Dict[str, Any] = {
         "source": {
@@ -651,7 +648,9 @@ def build_report_summary(root_dir: Path, project_root: Optional[Path] = None) ->
                 "xlsx_violations_total": prqa_hmr.get("violations_total") if isinstance(prqa_hmr, dict) else None,
                 "top_rules": prqa_rcr_details.get("top_rules") if isinstance(prqa_rcr_details, dict) else [],
                 "top_files": prqa_rcr_details.get("top_files") if isinstance(prqa_rcr_details, dict) else [],
+                "hmr_stats": as_hmr_stats,
             },
+            "code_metrics": code_metrics,
             "vectorcast": {
                 "metrics_avg_pct": vcast_metrics.get("avg_pct") if isinstance(vcast_metrics, dict) else None,
                 "metrics_samples": vcast_metrics.get("samples") if isinstance(vcast_metrics, dict) else None,

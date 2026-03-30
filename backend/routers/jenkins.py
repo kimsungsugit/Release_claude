@@ -14,6 +14,8 @@ import asyncio
 import uuid
 from pathlib import Path
 
+from backend.user_context import wrap_with_user
+
 from backend.schemas import (
     CallTreePreviewRequest,
     JenkinsBuildInfoRequest,
@@ -634,7 +636,7 @@ def jenkins_sync_async(req: JenkinsSyncRequest) -> Dict[str, Any]:
                 job_id=job_id,
             )
 
-    t = threading.Thread(target=_run_sync, daemon=True)
+    t = threading.Thread(target=wrap_with_user(_run_sync), daemon=True)
     t.start()
     return {"ok": True, "job_id": job_id}
 
@@ -1529,7 +1531,7 @@ async def jenkins_uds_generate_async(
                 job_id=job_id,
             )
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_worker), daemon=True).start()
     return {"ok": True, "job_id": job_id}
 
 
@@ -1865,7 +1867,7 @@ async def jenkins_sts_generate_async(
         except Exception as exc:
             _set_progress("jenkins_sts", job_url, build_selector, {"stage": "error", "percent": 100, "message": str(exc)[:300], "done": True, "error": str(exc)[:500]}, job_id=job_id)
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_worker), daemon=True).start()
     return {"ok": True, "job_id": job_id}
 
 
@@ -2005,7 +2007,7 @@ async def jenkins_suts_generate_async(
         except Exception as exc:
             _set_progress("jenkins_suts", job_url, build_selector, {"stage": "error", "percent": 100, "message": str(exc)[:300], "done": True, "error": str(exc)[:500]}, job_id=job_id)
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_worker), daemon=True).start()
     return {"ok": True, "job_id": job_id}
 
 
@@ -2593,6 +2595,6 @@ def jenkins_report_publish_async(req: JenkinsPublishRequest) -> Dict[str, Any]:
             job_id=job_id,
         )
 
-    t = threading.Thread(target=_run_publish, daemon=True)
+    t = threading.Thread(target=wrap_with_user(_run_publish), daemon=True)
     t.start()
     return {"ok": True, "job_id": job_id}

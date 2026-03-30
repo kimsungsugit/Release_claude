@@ -36,12 +36,16 @@ async function pollJenkinsProgress(jobUrl, buildSelector, jobId, action, { onMsg
 
 /** Poll impact job until completed or failed */
 async function pollImpactJob(jobId, { onMsg, signal }) {
+  const t0 = Date.now();
   while (true) {
     if (signal?.aborted) throw new Error('AbortError');
-    await new Promise(r => setTimeout(r, 2500));
+    await new Promise(r => setTimeout(r, 3000));
     const data = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}`);
     const job = data?.job || {};
-    if (job.message) onMsg(job.message);
+    const elapsed = Math.round((Date.now() - t0) / 1000);
+    const timeStr = elapsed > 60 ? `${Math.floor(elapsed / 60)}분 ${elapsed % 60}초` : `${elapsed}초`;
+    const msg = job.message || job.stage || '';
+    onMsg(`${msg} (${timeStr} 경과)`);
     if (job.status === 'completed') {
       const resultData = await api(`/api/scm/impact-job/${encodeURIComponent(jobId)}/result`);
       return resultData?.result || {};
@@ -98,6 +102,9 @@ export default function Dashboard({ onGoDetail }) {
     if (msg) setStepMsgs(p => ({ ...p, [id]: msg }));
   };
 
+  /* Analysis result cache keyed by jobUrl + buildNumber */
+  const cacheRef = useRef({}); // { [jobUrl]: { buildNumber, result, timestamp } }
+
   /* One-button automation */
   const runAnalysis = useCallback(async () => {
     if (!selectedJob) return;
@@ -123,6 +130,13 @@ export default function Dashboard({ onGoDetail }) {
     let scmList = [];
     let impactData = null;
 
+    // Helper: update result progressively so UI shows data as it arrives
+    const updateResult = () => {
+      const current = { artifacts, reportData, scmList, impactData, jobUrl, cacheRoot };
+      setResult(current);
+      setAnalysisResult(current);
+    };
+
     try {
       /* ── Step 1: Artifact sync (job_id polling) ── */
       setStep('sync', 'active', '동기화 시작 중...');
@@ -147,6 +161,31 @@ export default function Dashboard({ onGoDetail }) {
 
       setStep('sync', 'done', '동기화 완료');
 
+      /* ── Cache check: quick build-info to compare build number ── */
+      try {
+        const buildInfo = await post('/api/jenkins/build-info', {
+          job_url: jobUrl,
+          username: cfg.username,
+          api_token: cfg.token,
+          verify_tls: cfg.verifyTls,
+        });
+        const currentBuild = buildInfo?.number ?? buildInfo?.build_number;
+        const cached = cacheRef.current[jobUrl];
+        if (cached && cached.buildNumber === currentBuild && cached.result) {
+          // Build unchanged — use cached result
+          setStep('report', 'done', `빌드 #${currentBuild} (캐시)`);
+          setStep('scm', 'done', '캐시 사용');
+          setStep('impact', 'done', '캐시 사용');
+          setResult(cached.result);
+          setAnalysisResult(cached.result);
+          toast('success', `빌드 #${currentBuild} 변경 없음 — 캐시된 결과를 불러왔습니다.`);
+          setRunning(false);
+          return;
+        }
+      } catch (_) {
+        // build-info failed — proceed with full analysis
+      }
+
       /* ── Step 2: Report data + artifact list ── */
       setStep('report', 'active', '빌드 정보 수집 중...');
       try {
@@ -155,7 +194,6 @@ export default function Dashboard({ onGoDetail }) {
           cache_root: cacheRoot,
           build_selector: buildSelector,
         });
-        // flatten kpis.build → top-level for UI compatibility
         reportData = {
           ...raw,
           build_number: raw?.kpis?.build?.build_number ?? raw?.build_number,
@@ -166,7 +204,6 @@ export default function Dashboard({ onGoDetail }) {
             ? Math.round(raw.kpis.coverage.line_rate * 100)
             : (typeof raw?.coverage === 'number' ? raw.coverage : null),
         };
-        // extract artifact list from summary
         const artMap = raw?.artifacts ?? {};
         artifacts = Object.entries(artMap).flatMap(([type, list]) =>
           (Array.isArray(list) ? list : []).map(f => ({
@@ -181,8 +218,8 @@ export default function Dashboard({ onGoDetail }) {
         setStep('report', 'done', `빌드 #${reportData.build_number ?? '?'} (${artifacts.length}개 파일)`);
       } catch (e) {
         setStep('report', 'error', e.message);
-        // non-fatal: continue
       }
+      updateResult(); // show build info immediately
 
       /* ── Step 3: SCM list ── */
       setStep('scm', 'active', 'SCM 조회 중...');
@@ -193,6 +230,7 @@ export default function Dashboard({ onGoDetail }) {
       } catch (e) {
         setStep('scm', 'error', e.message);
       }
+      updateResult(); // show SCM info
 
       /* ── Step 4: Impact analysis (job_id polling) ── */
       if (scmList.length > 0) {
@@ -203,6 +241,7 @@ export default function Dashboard({ onGoDetail }) {
             scm_id: scm.id,
             build_number: reportData?.build_number ?? 0,
             job_url: jobUrl,
+            base_ref: scm.base_ref || '',
             targets: ['uds', 'suts', 'sits', 'sts', 'sds'],
           });
 
@@ -212,7 +251,6 @@ export default function Dashboard({ onGoDetail }) {
             signal,
             onMsg: msg => setStep('impact', 'active', msg),
           });
-          // attach linked_docs from SCM for display
           impactData._linked_docs = scm.linked_docs || {};
           impactData._scm_name = scm.name || scm.id;
           setStep('impact', 'done', '완료');
@@ -225,9 +263,17 @@ export default function Dashboard({ onGoDetail }) {
         setStep('impact', 'done', 'SCM 미등록 — 건너뜀');
       }
 
-      const final = { artifacts, reportData, scmList, impactData, jobUrl, cacheRoot };
-      setResult(final);
-      setAnalysisResult(final);
+      updateResult(); // final update with impact
+
+      // Cache result keyed by jobUrl + buildNumber
+      const bn = reportData?.build_number;
+      if (bn) {
+        cacheRef.current[jobUrl] = {
+          buildNumber: bn,
+          result: { artifacts, reportData, scmList, impactData, jobUrl, cacheRoot },
+          timestamp: Date.now(),
+        };
+      }
       toast('success', '분석이 완료되었습니다.');
     } catch (e) {
       if (e.message !== 'AbortError') {
@@ -412,44 +458,232 @@ function JobCard({ job, selected, onClick }) {
 
 /* ── Result panel ─────────────────────────────────────────────────── */
 function ResultPanel({ result, onGoDetail }) {
-  const { artifacts, reportData, impactData } = result;
+  const { artifacts, reportData, impactData, scmList } = result;
+  const kpis = reportData?.kpis || {};
+  const build = kpis.build || {};
+  const cov = kpis.coverage || {};
+  const tests = kpis.tests || {};
+  const scan = kpis.scan || {};
+  const fileTypes = kpis.files || {};
+  const prqa = kpis.prqa || {};
+  const linkedDocs = impactData?._linked_docs || scmList?.[0]?.linked_docs || {};
+  const linkedCount = Object.values(linkedDocs).filter(Boolean).length;
 
   return (
     <div>
       <div className="divider" />
+
+      {/* ── KPI Cards ── */}
+      <div className="stats-row" style={{ marginBottom: 16 }}>
+        {/* Build */}
+        <div className="stat-card">
+          <div className="stat-value">
+            <StatusBadge tone={buildTone(build.result || reportData?.result)}>
+              #{build.build_number || reportData?.build_number || '?'} {build.result || reportData?.result || '-'}
+            </StatusBadge>
+          </div>
+          <div className="stat-label">빌드 결과</div>
+        </div>
+        {/* Coverage */}
+        {cov.line_rate != null && (
+          <div className="stat-card">
+            <div className="stat-value" style={{ color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
+              {Math.round(cov.line_rate * 100)}%
+            </div>
+            <div className="stat-label">Line Coverage</div>
+          </div>
+        )}
+        {cov.branch_rate != null && (
+          <div className="stat-card">
+            <div className="stat-value" style={{ color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
+              {Math.round(cov.branch_rate * 100)}%
+            </div>
+            <div className="stat-label">Branch Coverage</div>
+          </div>
+        )}
+        {/* Tests */}
+        <div className="stat-card">
+          <div className="stat-value" style={{ color: tests.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
+            {tests.ok ? 'PASS' : (tests.ok === false ? 'FAIL' : '-')}
+          </div>
+          <div className="stat-label">테스트</div>
+        </div>
+        {/* File count */}
+        <div className="stat-card">
+          <div className="stat-value">{scan.files_total ?? artifacts.length ?? 0}</div>
+          <div className="stat-label">아티팩트</div>
+        </div>
+        {/* Linked docs */}
+        <div className="stat-card">
+          <div className="stat-value">{linkedCount}</div>
+          <div className="stat-label">연결 문서</div>
+        </div>
+      </div>
+
       <div className="result-grid">
-        {/* Artifacts */}
+        {/* ── Left: Build & Artifact Summary ── */}
         <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)' }}>
           <div className="panel-header">
-            <span className="panel-title">📦 Jenkins 아티팩트 현황</span>
-            {reportData?.build_number && (
-              <StatusBadge tone={buildTone(reportData?.result)}>
-                #{reportData.build_number} {reportData.result}
-              </StatusBadge>
-            )}
+            <span className="panel-title">빌드 & 아티팩트 요약</span>
           </div>
-          {reportData && (
-            <div style={{ marginBottom: 8 }}>
-              <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
-                {reportData.branch && <span className="pill pill-info">🌿 {reportData.branch}</span>}
-                {reportData.commit && (
-                  <span className="pill pill-neutral" style={{ fontFamily: 'monospace' }}>
-                    {reportData.commit?.slice(0, 8)}
-                  </span>
-                )}
+
+          {/* Build timestamp */}
+          {build.timestamp && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, padding: '6px 10px', background: 'var(--card-bg, var(--surface))', borderRadius: 6, border: '1px solid var(--border)' }}>
+              <span style={{ fontSize: 16 }}>📅</span>
+              <div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>빌드 일시</div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{new Date(build.timestamp).toLocaleString('ko-KR')}</div>
               </div>
             </div>
           )}
-          <ArtifactList artifacts={artifacts} reportData={reportData} />
-          {artifacts.length === 0 && !reportData?.artifact_list?.length && (
-            <div className="text-muted text-sm mt-2">아티팩트 없음</div>
-          )}
+
+          {/* File type bar chart */}
+          {(() => {
+            const entries = Object.entries(fileTypes);
+            if (!entries.length) return null;
+            const total = entries.reduce((s, [, c]) => s + c, 0);
+            const BAR_COLORS = { html: '#3b82f6', xlsx: '#22c55e', json: '#f59e0b', csv: '#8b5cf6', md: '#64748b', pdf: '#ef4444' };
+            return (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>파일 유형 분포</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>총 {total}개</span>
+                </div>
+                {/* Stacked bar */}
+                <div style={{ display: 'flex', height: 20, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border)' }}>
+                  {entries.map(([ext, cnt]) => (
+                    <div
+                      key={ext}
+                      title={`${ext.toUpperCase()}: ${cnt}`}
+                      style={{
+                        width: `${(cnt / total) * 100}%`,
+                        background: BAR_COLORS[ext] || '#94a3b8',
+                        minWidth: 12,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 9, fontWeight: 700, color: '#fff',
+                        cursor: 'default',
+                      }}
+                    >
+                      {cnt >= 2 ? cnt : ''}
+                    </div>
+                  ))}
+                </div>
+                {/* Legend */}
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', marginTop: 6 }}>
+                  {entries.map(([ext, cnt]) => (
+                    <div key={ext} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 2, background: BAR_COLORS[ext] || '#94a3b8', flexShrink: 0 }} />
+                      <span style={{ color: 'var(--text-muted)' }}>{ext.toUpperCase()}</span>
+                      <span style={{ fontWeight: 600 }}>{cnt}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* PRQA 정적분석 */}
+          {prqa.rule_violation_count != null && (() => {
+            const complianceRate = prqa.project_compliance_index;
+            const hmr = prqa.hmr_stats || {};
+            return (
+              <div style={{ marginBottom: 10, padding: '10px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>PRQA 정적분석</span>
+                  {complianceRate != null && (
+                    <span className={`pill ${complianceRate >= 90 ? 'pill-success' : complianceRate >= 70 ? 'pill-warning' : 'pill-danger'}`} style={{ fontSize: 11 }}>
+                      준수율 {complianceRate}%
+                    </span>
+                  )}
+                </div>
+                {/* Compliance bar */}
+                {complianceRate != null && (
+                  <div style={{ height: 6, borderRadius: 3, background: 'var(--border)', marginBottom: 8, overflow: 'hidden' }}>
+                    <div style={{ height: '100%', width: `${complianceRate}%`, borderRadius: 3, background: complianceRate >= 90 ? 'var(--color-success)' : complianceRate >= 70 ? 'var(--color-warning)' : 'var(--color-danger)', transition: 'width 0.5s' }} />
+                  </div>
+                )}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: prqa.rule_violation_count > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{prqa.rule_violation_count}</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>위반 건수</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>{prqa.violated_rules ?? '-'}<span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-muted)' }}>/{(prqa.violated_rules ?? 0) + (prqa.compliant_rules ?? 0)}</span></div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>위반 규칙</div>
+                  </div>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: 16, fontWeight: 700 }}>{prqa.file_compliance_index ?? '-'}%</div>
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>파일 준수율</div>
+                  </div>
+                </div>
+                {/* HMR complexity stats */}
+                {hmr.functions_total && (
+                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4 }}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{hmr.functions_total}</div>
+                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>함수</div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: hmr.vg_max > 15 ? 'var(--color-danger)' : hmr.vg_max > 10 ? 'var(--color-warning)' : 'var(--color-success)' }}>{hmr.vg_max}</div>
+                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG Max</div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{hmr.vg_p95}</div>
+                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG P95</div>
+                    </div>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: 13, fontWeight: 700 }}>{hmr.vg_mean?.toFixed(1)}</div>
+                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG 평균</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Scan + Code Metrics + VectorCAST row */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {/* Scan */}
+            <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>스캔 결과</div>
+              {(scan.fail > 0 || scan.error > 0 || scan.warn > 0) ? (
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {scan.fail > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>FAIL {scan.fail}</span>}
+                  {scan.error > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>ERROR {scan.error}</span>}
+                  {scan.warn > 0 && <span className="pill pill-warning" style={{ fontSize: 10 }}>WARN {scan.warn}</span>}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-success)' }}>✓ 이상 없음</div>
+              )}
+            </div>
+
+            {/* Code Metrics */}
+            {kpis.code_metrics?.code_files && (
+              <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>코드 메트릭</div>
+                <div style={{ fontSize: 11 }}>
+                  <span style={{ fontWeight: 600 }}>{kpis.code_metrics.code_files}</span> 파일 · <span style={{ fontWeight: 600 }}>{kpis.code_metrics.functions}</span> 함수 · <span style={{ fontWeight: 600 }}>{kpis.code_metrics.nloc?.toLocaleString()}</span> LOC
+                </div>
+              </div>
+            )}
+
+            {/* VectorCAST */}
+            {reportData?.tester?.vectorcast?.test_rows_count != null && (
+              <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>VectorCAST</div>
+                <div style={{ fontSize: 11 }}>
+                  <span style={{ fontWeight: 600 }}>{reportData.tester.vectorcast.test_rows_count?.toLocaleString()}</span> TC · UT {(reportData.tester.vectorcast.ut_reports || []).length} / IT {(reportData.tester.vectorcast.it_reports || []).length}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Impact */}
+        {/* ── Right: Document & Impact Summary ── */}
         <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)' }}>
           <div className="panel-header">
-            <span className="panel-title">📄 문서 영향도</span>
+            <span className="panel-title">문서 & 영향도 요약</span>
           </div>
           <ImpactPanel impactData={impactData} />
         </div>
@@ -514,12 +748,14 @@ const _CHANGE_TYPE_KO = {
 };
 
 const _DOC_STATUS = {
-  completed: { color: 'var(--color-success)', label: '완료' },
-  auto:      { color: 'var(--color-success)', label: '자동 반영' },
-  flagged:   { color: 'var(--color-warning)', label: '수동 검토 필요' },
-  flag:      { color: 'var(--color-warning)', label: '수동 검토 필요' },
-  skipped:   { color: 'var(--text-muted)',    label: '건너뜀' },
-  error:     { color: 'var(--color-danger)',   label: '오류' },
+  completed:        { color: 'var(--color-success)', label: '완료' },
+  auto:             { color: 'var(--color-success)', label: '자동 반영' },
+  flagged:          { color: 'var(--color-warning)', label: '수동 검토 필요' },
+  flag:             { color: 'var(--color-warning)', label: '수동 검토 필요' },
+  review_required:  { color: 'var(--color-warning)', label: '수동 검토 필요' },
+  FLAG:             { color: 'var(--color-warning)', label: '수동 검토 필요' },
+  skipped:          { color: 'var(--text-muted)',    label: '건너뜀' },
+  error:            { color: 'var(--color-danger)',   label: '오류' },
 };
 
 function ImpactPanel({ impactData }) {
@@ -534,7 +770,10 @@ function ImpactPanel({ impactData }) {
     );
   }
 
-  const changedFiles = Array.isArray(impactData.changed_files) ? impactData.changed_files : [];
+  // impact result may come from trigger.changed_files or top-level
+  const trigger = impactData.trigger || {};
+  const changedFiles = Array.isArray(impactData.changed_files) ? impactData.changed_files
+    : Array.isArray(trigger.changed_files) ? trigger.changed_files : [];
   const changedFunctions = impactData.changed_functions ?? impactData.changed_function_types ?? {};
   const changedFnEntries = typeof changedFunctions === 'object' && !Array.isArray(changedFunctions)
     ? Object.entries(changedFunctions) : [];
@@ -544,7 +783,9 @@ function ImpactPanel({ impactData }) {
     indirect_1hop: Array.isArray(impact.indirect_1hop) ? impact.indirect_1hop.length : (impact.indirect_1hop ?? undefined),
     indirect_2hop: Array.isArray(impact.indirect_2hop) ? impact.indirect_2hop.length : (impact.indirect_2hop ?? undefined),
   };
-  const docs = impactData.documents && typeof impactData.documents === 'object' ? impactData.documents : {};
+  // documents from 'documents' or 'actions' key
+  const rawDocs = impactData.documents ?? impactData.actions ?? {};
+  const docs = typeof rawDocs === 'object' ? rawDocs : {};
   const warnings = Array.isArray(impactData.warnings) ? impactData.warnings : [];
   const linkedDocs = impactData._linked_docs || {};
   const scmName = impactData._scm_name || '';
@@ -666,6 +907,7 @@ function ImpactDocRow({ docKey, doc, open, onToggle }) {
   const st = _DOC_STATUS[doc?.status] || { color: 'var(--text-muted)', label: doc?.status || '-' };
   const summary = doc?.summary || {};
   const fns = Array.isArray(doc?.flagged_functions) ? doc.flagged_functions
+    : Array.isArray(doc?.functions) ? doc.functions
     : Array.isArray(doc?.changed_functions) ? doc.changed_functions.map(f => f?.function || f?.name || String(f))
     : Array.isArray(doc?.changed_cases) ? doc.changed_cases.map(f => f?.function || String(f))
     : [];

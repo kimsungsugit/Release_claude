@@ -36,6 +36,21 @@ if not _api_logger.handlers:
 
 app = FastAPI(title="DevOps Pro API", version="1.0")
 
+
+@app.on_event("startup")
+async def _startup():
+    import socket
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+    except Exception:
+        ip = "127.0.0.1"
+    _api_logger.info("=" * 50)
+    _api_logger.info("DevOps Release Server started")
+    _api_logger.info("  Local:   http://127.0.0.1:8000")
+    _api_logger.info("  Network: http://%s:8000", ip)
+    _api_logger.info("=" * 50)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -43,6 +58,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from backend.user_context import UserContextMiddleware  # noqa: E402
+app.add_middleware(UserContextMiddleware)
 
 
 @app.exception_handler(Exception)
@@ -100,3 +118,31 @@ from backend.routers.sessions import router as _sessions_router  # noqa: E402
 app.include_router(_sessions_router)
 from backend.routers.scm import router as _scm_router  # noqa: E402
 app.include_router(_scm_router)
+
+# ---------------------------------------------------------------------------
+# Serve frontend-v2 production build (static files + SPA fallback)
+# ---------------------------------------------------------------------------
+_frontend_dist = repo_root / "frontend-v2" / "dist"
+if (_frontend_dist / "index.html").exists():
+    from fastapi.staticfiles import StaticFiles  # noqa: E402
+    from fastapi.responses import FileResponse  # noqa: E402
+
+    _assets_dir = _frontend_dist / "assets"
+    if _assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="frontend_assets")
+
+    # Serve favicon
+    _favicon = _frontend_dist / "favicon.svg"
+    if _favicon.exists():
+        @app.get("/favicon.svg")
+        async def _favicon_svg():
+            return FileResponse(str(_favicon), media_type="image/svg+xml")
+
+    # SPA catch-all: return index.html for any unmatched route
+    @app.get("/{full_path:path}")
+    async def _spa_fallback(full_path: str):
+        return FileResponse(str(_frontend_dist / "index.html"))
+
+    _api_logger.info("Frontend-v2 production build served from %s", _frontend_dist)
+else:
+    _api_logger.warning("No frontend-v2 dist/ found at %s — run 'cd frontend-v2 && npm run build'", _frontend_dist)

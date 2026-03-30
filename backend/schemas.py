@@ -104,6 +104,7 @@ class ScmLinkedDocs(BaseModel):
     srs: str = ""
     sds: str = ""
     hsis: str = ""
+    stp: str = ""
 
 
 class ScmRegistryEntry(BaseModel):

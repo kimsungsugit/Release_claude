@@ -408,7 +408,12 @@ def _run_report_with_timeout(
 
 
 def _progress_key(action: str, job_url: str, build_selector: str, job_id: str = "") -> str:
-    return f"{action}::{(job_url or '').strip()}::{(build_selector or '').strip()}::{job_id or ''}"
+    try:
+        from backend.user_context import get_current_user
+        user = get_current_user()
+    except Exception:
+        user = "default"
+    return f"{user}::{action}::{(job_url or '').strip()}::{(build_selector or '').strip()}::{job_id or ''}"
 
 
 def _set_progress(
