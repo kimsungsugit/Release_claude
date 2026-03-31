@@ -41,11 +41,12 @@ unit-tests:
   tags:
     - shared
   before_script:
-    - python -m pip install -r requirements-dev.txt 2>$null
-    - python -m pip install -r requirements-core.txt 2>$null
+    - python -m pip install --no-build-isolation -r requirements-dev.txt 2>$null; $true
+    - python -m pip install --no-build-isolation -r requirements-core.txt 2>$null; $true
   script:
     - echo "=== Running Unit Tests ==="
     - python -m pytest tests/unit/ -x -q --tb=short
+  timeout: 5m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
