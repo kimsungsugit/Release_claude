@@ -48,7 +48,7 @@ unit-tests:
   script:
     - '[Environment]::SetEnvironmentVariable("PYTHONPATH", "$PWD", "Process")'
     - echo "=== Running Unit Tests ==="
-    - python -m pytest tests/unit/ -x -q --tb=short --ignore=tests/unit/test_impact_jobs.py
+    - python -m pytest tests/unit/ -q --tb=short --ignore=tests/unit/test_impact_jobs.py
   timeout: 15m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
