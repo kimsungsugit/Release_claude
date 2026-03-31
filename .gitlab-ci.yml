@@ -42,9 +42,11 @@ unit-tests:
   tags:
     - shared
   before_script:
+    - $env:PYTHONPATH = "$PWD"
     - python -m pip install --no-build-isolation -r requirements-dev.txt 2>$null; $true
     - python -m pip install --no-build-isolation -r requirements-core.txt 2>$null; $true
   script:
+    - $env:PYTHONPATH = "$PWD"
     - echo "=== Running Unit Tests ==="
     - python -m pytest tests/unit/ -x -q --tb=short
   timeout: 5m
