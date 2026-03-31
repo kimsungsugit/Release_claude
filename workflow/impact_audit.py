@@ -7,10 +7,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+try:
+    from filelock import FileLock
+except ImportError:
+    FileLock = None
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDIT_DIR = REPO_ROOT / "reports" / "impact_audit"
 LOCK_PATH = AUDIT_DIR / ".run_lock"
+_RUN_FILE_LOCK = FileLock(str(LOCK_PATH) + ".flock", timeout=5) if FileLock else threading.Lock()
 
 
 def _now_iso() -> str:
@@ -63,11 +69,24 @@ def ensure_audit_dir() -> Path:
 
 def acquire_run_lock(scm_id: str) -> Dict[str, Any]:
     ensure_audit_dir()
+    try:
+        if FileLock:
+            _RUN_FILE_LOCK.acquire(timeout=0)
+        elif not _RUN_FILE_LOCK.acquire(blocking=False):
+            raise TimeoutError("lock held")
+    except Exception:
+        # Lock held by another thread/process
+        existing = _load_json(LOCK_PATH, default={}) or {}
+        return {"ok": False, "reason": "active_lock", "lock_path": str(LOCK_PATH), "lock": existing}
+
+    # We hold the file lock — safe to check/write
     if LOCK_PATH.exists():
         existing = _load_json(LOCK_PATH, default={}) or {}
         pid = int(existing.get("pid") or 0)
         thread_id = int(existing.get("thread_id") or 0)
         if pid and _pid_alive(pid) and thread_id and _thread_alive(thread_id):
+            try: _RUN_FILE_LOCK.release()
+            except Exception: pass
             return {"ok": False, "reason": "active_lock", "lock_path": str(LOCK_PATH), "lock": existing}
         try:
             LOCK_PATH.unlink()
@@ -80,6 +99,8 @@ def acquire_run_lock(scm_id: str) -> Dict[str, Any]:
         "thread_id": threading.get_ident(),
     }
     _save_json(LOCK_PATH, payload)
+    try: _RUN_FILE_LOCK.release()
+    except Exception: pass
     return {"ok": True, "lock_path": str(LOCK_PATH), "lock": payload}
 
 

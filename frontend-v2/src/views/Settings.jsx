@@ -9,6 +9,7 @@ export default function Settings() {
       <ScmSection />
       <DocInputSection />
       <QualitySection />
+      <FileModeSection />
     </div>
   );
 }
@@ -339,6 +340,113 @@ function QualitySection() {
             <option value="fast">Fast</option>
           </select>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── File Mode Section ── */
+function FileModeSection() {
+  const toast = useToast();
+  const [config, setConfig] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [cloudiumCfg, setCloudiumCfg] = useState({
+    allowed_prefixes: '',
+  });
+
+  const loadConfig = useCallback(async () => {
+    try {
+      const data = await api('/api/file-mode');
+      setConfig(data);
+      if (data.mode === 'cloudium') {
+        setCloudiumCfg({
+          allowed_prefixes: (data.allowed_prefixes || []).join(', '),
+        });
+      }
+    } catch (e) {
+      console.warn('File mode config load failed:', e.message);
+    }
+  }, []);
+
+  useEffect(() => { loadConfig(); }, [loadConfig]);
+
+  const switchMode = async (mode) => {
+    setLoading(true);
+    try {
+      const body = mode === 'cloudium' ? { mode, ...cloudiumCfg } : { mode };
+      const data = await post('/api/file-mode', body);
+      setConfig(data);
+      toast('success', `파일 모드 변경: ${mode.toUpperCase()}`);
+    } catch (e) {
+      toast('error', `모드 전환 실패: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <div className="panel-header">
+        <span className="panel-title">파일 접근 모드</span>
+        {config && (
+          <span className={`pill ${config.mode === 'local' ? 'pill-success' : 'pill-info'}`}>
+            {config.mode?.toUpperCase()}
+          </span>
+        )}
+      </div>
+
+      <div className="field-group">
+        <div className="field">
+          <label>모드 선택</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className={config?.mode === 'local' ? 'btn-primary btn-sm' : 'btn-sm'}
+              onClick={() => switchMode('local')}
+              disabled={loading}
+            >
+              Local (로컬 파일시스템)
+            </button>
+            <button
+              className={config?.mode === 'cloudium' ? 'btn-primary btn-sm' : 'btn-sm'}
+              onClick={() => switchMode('cloudium')}
+              disabled={loading}
+            >
+              Cloudium (원격 접근)
+            </button>
+          </div>
+        </div>
+
+        {config?.mode === 'local' && (
+          <div className="text-sm text-muted" style={{ padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+            로컬 파일시스템에서 직접 파일을 읽습니다. 서버와 같은 PC에 파일이 있어야 합니다.
+          </div>
+        )}
+
+        {config?.mode === 'cloudium' && (
+          <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+            <div className="text-sm" style={{ marginBottom: 8, color: 'var(--text-muted)' }}>
+              클라우디움 모드에서는 허용된 경로만 접근 가능합니다.
+              로컬 경로(C:/, D:/ 등)는 차단됩니다.
+            </div>
+            <div className="field">
+              <label>허용 경로 (콤마로 구분)</label>
+              <input
+                type="text"
+                value={cloudiumCfg.allowed_prefixes}
+                onChange={e => setCloudiumCfg({ allowed_prefixes: e.target.value })}
+                placeholder="//cloudium-server/project, Z:/shared"
+              />
+            </div>
+            <button
+              className="btn-primary btn-sm"
+              onClick={() => switchMode('cloudium')}
+              disabled={loading}
+              style={{ marginTop: 8 }}
+            >
+              {loading ? '저장 중...' : '저장'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

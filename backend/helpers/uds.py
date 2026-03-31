@@ -31,6 +31,7 @@ from backend.state import (
 )
 from backend.services.paths import is_under_any
 from backend.services.jenkins_helpers import _detect_reports_dir, _job_slug
+from backend.helpers.jenkins import _resolve_cached_build_root, _jenkins_exports_dir, _jenkins_logic_dir
 from backend.services.report_parsers import build_report_summary
 
 import config

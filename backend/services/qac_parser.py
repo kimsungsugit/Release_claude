@@ -160,7 +160,7 @@ class HISItem:
         if start < 0 or end < 0:
             return ""
         
-        return data[start + 1:end].strip()
+        return data[start + 1:end]  # preserve leading space (C# compatible)
     
     def _split_table_data(self, is_matrix: bool, data: str) -> Optional[List[str]]:
         """테이블 데이터 분리"""
@@ -284,11 +284,11 @@ class QACDataManager:
         for tag in soup.find_all(["h3", "h4"]):
             text = tag.get_text(strip=True)
             if tag.name == "h3" and text.startswith("File"):
-                current_file = text.split(":", 1)[-1].strip()
+                current_file = text.split(":", 1)[-1]  # preserve leading space (C# compatible)
                 continue
             if tag.name != "h4" or "Function" not in text:
                 continue
-            function_name = text.split(":", 1)[-1].strip()
+            function_name = text.split(":", 1)[-1]  # preserve leading space (C# compatible)
             table = tag.find_next("table")
             if not table:
                 continue
@@ -333,8 +333,8 @@ class QACDataManager:
             return
         
         spec = self.dic_spec_over_count[item]
-        if warning_level <= spec.spec_count:
-            spec.list_spec[warning_level - 1] = spec.list_spec[warning_level - 1] + 1
+        if warning_level <= spec.spec_count and warning_level < len(spec.list_spec):
+            spec.list_spec[warning_level] = spec.list_spec[warning_level] + 1
     
     def get_spec_string(self, matrix: MatrixItem, warn_level: int) -> str:
         """스펙 문자열 반환"""
@@ -391,7 +391,10 @@ class QACDataManager:
     def clear(self) -> None:
         """초기화"""
         self.list_result.clear()
-        
+        self.clear_spec_over_count()
+
+    def clear_spec_over_count(self) -> None:
+        """스펙 초과 카운트만 리셋"""
         for spec in self.dic_spec_over_count.values():
             spec.clear(True)
 

@@ -299,41 +299,39 @@ class XlsxManager:
         for row in range(row_start, row_end + 1):
             for col in range(col_start, col_end + 1):
                 cell = self.worksheet.cell(row=row, column=col)
-                border = cell.border or Border()
-                
+                old = cell.border or Border()
+                kw = {"left": old.left, "right": old.right, "top": old.top, "bottom": old.bottom}
                 if edge == BorderEdge.Top:
-                    border.top = double_side
+                    kw["top"] = double_side
                 elif edge == BorderEdge.Bottom:
-                    border.bottom = double_side
+                    kw["bottom"] = double_side
                 elif edge == BorderEdge.Left:
-                    border.left = double_side
+                    kw["left"] = double_side
                 elif edge == BorderEdge.Right:
-                    border.right = double_side
-                
-                cell.border = border
+                    kw["right"] = double_side
+                cell.border = Border(**kw)
     
     def draw_thick_border(self, row_start: int, col_start: int, row_end: int, col_end: int, edge: BorderEdge, color: str = "000000") -> None:
         """굵은 테두리 그리기"""
         if not self.worksheet:
             return
-        
+
         thick_side = Side(style="thick", color=color)
-        
+
         for row in range(row_start, row_end + 1):
             for col in range(col_start, col_end + 1):
                 cell = self.worksheet.cell(row=row, column=col)
-                border = cell.border or Border()
-                
+                old = cell.border or Border()
+                kw = {"left": old.left, "right": old.right, "top": old.top, "bottom": old.bottom}
                 if edge == BorderEdge.Top:
-                    border.top = thick_side
+                    kw["top"] = thick_side
                 elif edge == BorderEdge.Bottom:
-                    border.bottom = thick_side
+                    kw["bottom"] = thick_side
                 elif edge == BorderEdge.Left:
-                    border.left = thick_side
+                    kw["left"] = thick_side
                 elif edge == BorderEdge.Right:
-                    border.right = thick_side
-                
-                cell.border = border
+                    kw["right"] = thick_side
+                cell.border = Border(**kw)
     
     def close(self, save: bool = True) -> bool:
         """Excel 파일 저장 및 닫기"""
@@ -414,10 +412,12 @@ def generate_testcase_excel(tcbank: TCBank, output_path: Path, mode: str = "Test
             col += len(tcbank.exp_result_names)
         
         # Related ID 헤더
+        related_id_col = col
         excel.write_data(current_row, col, "Related ID")
-        excel.merge(current_row, col, current_row + 1, col)
-        
+
         excel.apply_style(current_row, col_offset, current_row, col_offset + col_count - 1, XlsCellStyle.Caption)
+
+        # Sub-header row (input/expected names)
         current_row += 1
         
         # 데이터 행

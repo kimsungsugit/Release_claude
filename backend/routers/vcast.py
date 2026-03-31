@@ -421,18 +421,21 @@ def vcast_process_jenkins(req: VCastProcessJenkinsRequest) -> Dict[str, Any]:
         if not build_root:
             raise HTTPException(status_code=404, detail="Cached build not found")
         
-        # 리포트 파일 패턴
+        # 리포트 파일 패턴 (Jenkins VectorCAST 파일명 형식 지원)
         patterns = {
-            "TestCaseData": "*TestCaseDataReport.html",
-            "ExecutionResult": "*ExecutionResultReport.html",
-            "Metrics": "*MetricsReport.html",
-            "AggregateCoverage": "*AggregateCoverageReport.html",
+            "TestCaseData": ["*full_report.html", "*TestCaseDataReport.html", "*testcase*.html"],
+            "ExecutionResult": ["*full_report.html", "*ExecutionResultReport.html"],
+            "Metrics": ["*metrics_report.html", "*MetricsReport.html"],
+            "AggregateCoverage": ["*aggregate_report.html", "*AggregateCoverageReport.html"],
         }
-        
-        pattern = patterns.get(req.report_type, "*TestCaseDataReport.html")
-        
-        # 리포트 파일 찾기
-        report_files = list(build_root.rglob(pattern))
+
+        file_patterns = patterns.get(req.report_type, ["*full_report.html"])
+
+        # 리포트 파일 찾기 (여러 패턴 시도)
+        report_files = []
+        for pattern in file_patterns:
+            report_files.extend(build_root.rglob(pattern))
+        report_files = list(dict.fromkeys(report_files))  # dedupe preserving order
         if not report_files:
             return {
                 "ok": False,
@@ -447,6 +450,8 @@ def vcast_process_jenkins(req: VCastProcessJenkinsRequest) -> Dict[str, Any]:
         report_type_map = {
             "TestCaseData": ReportType.TestCaseData,
             "ExecutionResult": ReportType.ExecutionResult,
+            "Metrics": ReportType.Metrics,
+            "AggregateCoverage": ReportType.AggregateCoverage,
         }
         report_type = report_type_map.get(req.report_type)
         if not report_type:
@@ -454,7 +459,7 @@ def vcast_process_jenkins(req: VCastProcessJenkinsRequest) -> Dict[str, Any]:
                 "ok": False,
                 "message": f"Unsupported report type: {req.report_type}",
             }
-        
+
         # 버전 확인
         version_map = {
             "Ver2021": VCASTVersion.Ver2021,
@@ -462,20 +467,32 @@ def vcast_process_jenkins(req: VCastProcessJenkinsRequest) -> Dict[str, Any]:
             "Ver2025": VCASTVersion.Ver2025,
         }
         version = version_map.get(req.version, VCASTVersion.Ver2025)
-        
+
         # 리포트 파싱
-        tcbank = parse_vcast_report(report_file, report_type, version)
-        
-        # 결과 반환
-        return {
+        parsed = parse_vcast_report(report_file, report_type, version)
+
+        # 결과 반환 (TCBank or MetricsBank)
+        result = {
             "ok": True,
             "file": str(report_file.relative_to(build_root)),
-            "environment": tcbank.environment,
-            "component_name": tcbank.component_name,
-            "test_count": tcbank.test_count,
-            "passed_count": tcbank.passed_count,
             "files_found": [str(f.relative_to(build_root)) for f in report_files],
         }
+        if hasattr(parsed, 'test_count'):
+            # TCBank
+            result.update({
+                "environment": parsed.environment,
+                "component_name": parsed.component_name,
+                "test_count": parsed.test_count,
+                "passed_count": parsed.passed_count,
+            })
+        elif hasattr(parsed, 'statement_data'):
+            # MetricsBank
+            result.update({
+                "environment": parsed.environment,
+                "statement_units": len(parsed.statement_data or {}),
+                "functions_units": len(parsed.functions_data or {}),
+            })
+        return result
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Process error: {str(e)}")

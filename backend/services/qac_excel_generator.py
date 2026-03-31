@@ -39,7 +39,10 @@ def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
     title_col_count = 7
     
     excel.select_sheet(1, "QAC Report", True)
-    
+
+    # 스펙 카운트 리셋 (Excel 생성 시 다시 카운트)
+    qac_manager.clear_spec_over_count()
+
     # 제목
     excel.write_data(1, 1, "QAC Report")
     excel.apply_style(1, 1, 1, title_col_count, XlsCellStyle.Title)
@@ -78,14 +81,20 @@ def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
     # 헤더 스타일 적용
     excel.apply_style(row_offset, col_offset, row_offset + 1, col_offset + col_count - 1, XlsCellStyle.Caption)
     
+    # 헤더 병합: Index, Function, File은 2행 병합 (C# 원본과 동일)
+    excel.merge(row_offset, col_offset, row_offset + 1, col_offset)          # Index
+    excel.merge(row_offset, col_offset + 1, row_offset + 1, col_offset + 1)  # Function
+    # File column: NOT merged, both rows have "File" (C# compatible)
+
     # 데이터 행
     current_row += 1
-    row_num = 1
-    
+    row_num = 0  # C# 원본은 0부터 시작
+
     for his_item in qac_manager.list_result:
         col = col_offset
         excel.write_data(current_row, col, row_num)
         col += 1
+        # C# 원본은 함수명/파일명 앞에 space 보존
         excel.write_data(current_row, col, his_item.function_name)
         col += 1
         
@@ -113,9 +122,11 @@ def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
         current_row += 1
         row_num += 1
     
-    # Total 행들 (경고 레벨별)
-    for warn_level in range(1, 4):  # Level 1, 2, 3
-        excel.write_data(current_row, col_offset, "Total")
+    # Total 행들 (Level 0 = 경고 없음, Level 1,2,3 = 경고 레벨별)
+    total_items = len(qac_manager.list_result)
+    for warn_level in range(0, 4):  # Level 0, 1, 2, 3
+        if warn_level == 0:
+            excel.write_data(current_row, col_offset, "Total")
         excel.write_data(current_row, col_offset + 1, f"Level {warn_level}")
         
         col = col_offset + 2
@@ -126,21 +137,28 @@ def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
             if col_idx < 0:
                 excel.write_data(current_row, col, "-")
                 excel.apply_style(current_row, col, current_row, col, XlsCellStyle.BgLightGray)
+            elif warn_level == 0:
+                # Level 0: directly from spec_over_count[0] (C# compatible)
+                if matrix in qac_manager.dic_spec_over_count:
+                    spec = qac_manager.dic_spec_over_count[matrix]
+                    count = spec.list_spec[0] if len(spec.list_spec) > 0 else 0
+                    excel.write_data(current_row, col, str(count))
+                else:
+                    excel.write_data(current_row, col, str(total_items))
             else:
                 if matrix in qac_manager.dic_spec_over_count:
                     spec = qac_manager.dic_spec_over_count[matrix]
-                    if warn_level <= spec.spec_count:
-                        count = spec.list_spec[warn_level - 1]
+                    if warn_level < len(spec.list_spec):
+                        count = spec.list_spec[warn_level]
                         excel.write_data(current_row, col, str(count))
-                        
-                        # 경고 레벨에 따른 스타일
+
                         if warn_level == 1:
                             excel.apply_style(current_row, col, current_row, col, XlsCellStyle.BgYellow)
                         elif warn_level == 2:
                             excel.apply_style(current_row, col, current_row, col, XlsCellStyle.BgOrange)
                         elif warn_level == 3:
                             excel.apply_style(current_row, col, current_row, col, XlsCellStyle.BgRed)
-                        
+
                         spec_str = qac_manager.get_spec_string(matrix, warn_level)
                         if spec_str:
                             if spec_string:
@@ -152,16 +170,20 @@ def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
                 else:
                     excel.write_data(current_row, col, "-")
                     excel.apply_style(current_row, col, current_row, col, XlsCellStyle.BgLightGray)
-            
+
             col += 1
         
         excel.write_data(current_row, col, spec_string)
         excel.apply_style(current_row, col_offset, current_row, col, XlsCellStyle.BgLightGray)
         current_row += 1
     
+    # Total 행의 "Total" 셀 병합 (4개 행)
+    total_start_row = current_row - 4
+    excel.merge(total_start_row, col_offset, current_row - 1, col_offset)
+
     # 일반 데이터 스타일 적용
     excel.apply_style(row_offset + 2, col_offset, current_row - 1, col_offset + col_count - 1, XlsCellStyle.General)
-    
+
     # 열 너비 설정
     widths = [80, 300] + [80] * len(matrix_list) + [500]
     for col in range(col_offset, col_offset + col_count):

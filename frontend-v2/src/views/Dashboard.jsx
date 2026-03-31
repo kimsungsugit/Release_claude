@@ -182,8 +182,8 @@ export default function Dashboard({ onGoDetail }) {
           setRunning(false);
           return;
         }
-      } catch (_) {
-        // build-info failed — proceed with full analysis
+      } catch (e) {
+        console.debug('Build info cache check skipped:', e.message);
       }
 
       /* ── Step 2: Report data + artifact list ── */

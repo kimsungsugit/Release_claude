@@ -5,6 +5,10 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
+try:
+    from filelock import FileLock
+except ImportError:
+    FileLock = None
 from pydantic import ValidationError
 
 from backend.schemas import (
@@ -18,6 +22,8 @@ from backend.schemas import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REGISTRY_PATH = REPO_ROOT / "config" / "scm_registry.json"
+import threading as _threading
+_REGISTRY_LOCK = FileLock(str(REGISTRY_PATH) + ".lock", timeout=10) if FileLock else _threading.Lock()
 
 
 def _now_iso() -> str:
@@ -69,12 +75,14 @@ def load_registry_store() -> ScmRegistryStore:
 
 
 def save_registry_store(store: ScmRegistryStore) -> Path:
-    _save_json(REGISTRY_PATH, store.model_dump(mode="json"))
+    with _REGISTRY_LOCK:
+        _save_json(REGISTRY_PATH, store.model_dump(mode="json"))
     return REGISTRY_PATH
 
 
 def list_registry_entries() -> List[ScmRegistryEntry]:
-    return load_registry_store().registries
+    with _REGISTRY_LOCK:
+        return load_registry_store().registries
 
 
 def get_registry_entry(entry_id: str) -> ScmRegistryEntry | None:

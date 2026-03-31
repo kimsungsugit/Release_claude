@@ -68,15 +68,10 @@ export default function ScmSection({ job, analysisResult }) {
     const entries = Object.entries(docs).filter(([, v]) => v);
     if (entries.length === 0) return;
     const result = {};
-    for (const [key, path] of entries) {
+    for (const [key, docPath] of entries) {
       try {
-        const data = await post('/api/jenkins/source-root', {
-          job_url: job.url,
-          cache_root: cacheRoot,
-          build_selector: cfg.buildSelector,
-        });
-        // If the endpoint returns paths info, consider the file found
-        result[key] = data ? 'found' : 'unknown';
+        const data = await post('/api/file-mode/check-access', { path: docPath });
+        result[key] = data?.accessible ? 'found' : 'not_found';
       } catch {
         result[key] = 'unknown';
       }

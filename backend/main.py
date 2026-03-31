@@ -51,6 +51,14 @@ async def _startup():
     _api_logger.info("  Network: http://%s:8000", ip)
     _api_logger.info("=" * 50)
 
+    # Log file access mode
+    from backend.services.file_resolver import get_resolver
+    resolver = get_resolver()
+    _api_logger.info("  File mode: %s", resolver.mode)
+    if resolver.mode == "cloudium":
+        cfg = resolver.get_config()
+        _api_logger.info("  Allowed paths: %s", cfg.get("allowed_prefixes", []))
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -138,7 +146,12 @@ if (_frontend_dist / "index.html").exists():
         async def _favicon_svg():
             return FileResponse(str(_favicon), media_type="image/svg+xml")
 
-    # SPA catch-all: return index.html for any unmatched route
+    # Explicit 404 for unmatched API routes (prevents SPA fallback masking)
+    @app.get("/api/{api_path:path}")
+    async def _api_not_found(api_path: str):
+        raise HTTPException(status_code=404, detail=f"API endpoint not found: /api/{api_path}")
+
+    # SPA catch-all: return index.html for any non-API unmatched route
     @app.get("/{full_path:path}")
     async def _spa_fallback(full_path: str):
         return FileResponse(str(_frontend_dist / "index.html"))

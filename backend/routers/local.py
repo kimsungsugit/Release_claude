@@ -14,6 +14,8 @@ import asyncio
 import uuid
 from pathlib import Path
 
+from backend.user_context import wrap_with_user
+
 from backend.schemas import (
     EditorReadAbsRequest,
     EditorReadRequest,
@@ -151,7 +153,7 @@ def _build_local_excel_output(base_dir: Path, category: str, stem: str, template
     else:
         target_dir = _local_suts_dir(base_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{uuid.uuid4().hex[:4]}"
     suffix = _pick_excel_suffix(template_path)
     filename = f"{stem}_{ts}{suffix}"
     return filename, target_dir / filename
@@ -1282,7 +1284,7 @@ async def local_uds_generate_async(
                 job_id=job_id,
             )
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_worker), daemon=True).start()
     return {"ok": True, "job_id": job_id}
 
 
@@ -2016,7 +2018,7 @@ async def local_sts_generate_stream(
         except Exception as e:
             progress_queue.put({"type": "error", "detail": str(e)})
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_run), daemon=True).start()
 
     def _event_stream():
         while True:
@@ -2244,7 +2246,7 @@ async def local_sts_generate_async(
                 job_id=job_id,
             )
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_worker), daemon=True).start()
     return {"ok": True, "job_id": job_id}
 
 
@@ -2529,7 +2531,7 @@ async def local_suts_generate_stream(
         except Exception as e:
             progress_queue.put({"type": "error", "detail": str(e)})
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_run), daemon=True).start()
 
     def _event_stream():
         while True:
@@ -2673,7 +2675,7 @@ async def local_suts_generate_async(
                 job_id=job_id,
             )
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_worker), daemon=True).start()
     return {"ok": True, "job_id": job_id}
 
 
@@ -2938,7 +2940,7 @@ async def local_sits_generate_stream(
         except Exception as e:
             progress_queue.put({"type": "error", "detail": str(e)})
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_run), daemon=True).start()
 
     def _event_stream():
         while True:
@@ -3084,7 +3086,7 @@ async def local_sits_generate_async(
                 job_id=job_id,
             )
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=wrap_with_user(_worker), daemon=True).start()
     return {"ok": True, "job_id": job_id}
 
 

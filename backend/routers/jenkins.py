@@ -70,6 +70,11 @@ from report_generator import (
     generate_uds_field_quality_gate_report,
     generate_uds_constraints_report,
     generate_uds_preview_html,
+    generate_uds_traceability_matrix,
+    generate_uds_requirements_preview,
+    generate_uds_requirements_mapping,
+    generate_uds_requirements_compare,
+    generate_uds_function_mapping,
 )
 try:
     from workflow.rag import _read_text_from_file, get_kb, ingest_external_sources

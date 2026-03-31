@@ -1,5 +1,5 @@
 import { useState, useCallback, useMemo } from 'react';
-import { post } from '../../api.js';
+import { post, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 import { defaultCacheRoot } from '../../api.js';
@@ -28,12 +28,46 @@ export default function SrsSdsSection({ job, analysisResult }) {
   const loadMatrix = useCallback(async () => {
     setLoading(true);
     try {
+      // Step 1: Get requirements + mapping from SRS via requirements-preview
+      const form = new FormData();
+      if (docPaths.srs) form.append('req_paths', docPaths.srs);
+      const scm = analysisResult?.scmList?.[0];
+      if (scm?.source_root) form.append('source_root', scm.source_root);
+
+      let reqItems = [];
+      let mappingPairs = [];
+      try {
+        const user = getUsername();
+        const previewRes = await fetch('/api/jenkins/uds/requirements-preview', {
+          method: 'POST', body: form,
+          headers: user ? { 'X-User': user } : {},
+        });
+        if (previewRes.ok) {
+          const previewData = await previewRes.json();
+          reqItems = previewData?.preview?.items || [];
+          mappingPairs = previewData?.traceability?.mapping_pairs
+            || previewData?.mapping || [];
+        }
+      } catch (e) {
+        toast('warning', `요구사항 미리보기 실패 (매핑 없이 진행): ${e.message}`);
+      }
+
+      // Step 2: Get VectorCAST test rows
+      let vcastRows = [];
+      try {
+        const ragData = await post('/api/jenkins/report/vectorcast-rag', {
+          job_url: job.url,
+          cache_root: cacheRoot,
+          build_selector: cfg.buildSelector || 'lastSuccessfulBuild',
+        });
+        vcastRows = ragData?.data?.test_rows || [];
+      } catch (_) { /* VectorCAST 데이터 없으면 빈 배열로 진행 */ }
+
+      // Step 3: Generate traceability matrix
       const data = await post('/api/jenkins/uds/traceability-matrix', {
-        job_url: job.url,
-        cache_root: cacheRoot,
-        build_selector: cfg.buildSelector,
-        srs_path: docPaths.srs || '',
-        sds_path: docPaths.sds || '',
+        requirement_items: reqItems,
+        mapping_pairs: mappingPairs,
+        vcast_rows: vcastRows,
       });
       setMatrix(data);
     } catch (e) {
@@ -285,8 +319,9 @@ function CoverageBar({ covered, partial, total }) {
 const PAGE_SIZE = 30;
 
 function TraceMatrix({ matrix }) {
-  const rows = matrix?.rows ?? matrix?.items ?? matrix?.matrix ?? [];
-  const summary = matrix?.summary;
+  const inner = matrix?.matrix ?? matrix;
+  const rows = Array.isArray(inner?.rows) ? inner.rows : (Array.isArray(inner?.items) ? inner.items : []);
+  const summary = inner?.summary ?? matrix?.summary;
 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');

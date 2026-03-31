@@ -60,7 +60,8 @@ def test_run_impact_update_dry_run_builds_auto_and_flag_actions(tmp_path, monkey
 
     assert result["ok"] is True
     assert result["dry_run"] is True
-    assert result["actions"]["uds"]["mode"] == "AUTO"
+    # auto_generate defaults to False, so AUTO is downgraded to FLAG
+    assert result["actions"]["uds"]["mode"] == "FLAG"
     assert result["actions"]["sts"]["mode"] == "FLAG"
     assert result["impact"]["indirect_1hop"] == ["door_helper"]
     assert result["impact"]["indirect_2hop"] == ["door_leaf"]
@@ -195,12 +196,12 @@ def test_run_impact_update_executes_auto_and_flag_actions(tmp_path, monkeypatch)
 
     updated = scm_registry.get_registry_entry("hdpdm01")
     assert result["ok"] is True
-    assert result["actions"]["uds"]["status"] == "completed"
-    assert result["actions"]["uds"]["output_path"].endswith("uds.out")
+    # auto_generate defaults to False, so all AUTO actions are downgraded to FLAG
+    assert result["actions"]["uds"]["status"] == "review_required"
+    assert result["actions"]["uds"]["artifact_path"].endswith("uds_review.md")
     assert result["actions"]["sts"]["artifact_path"].endswith("sts_review.md")
     assert result["change_log"]["path"].endswith(".json")
     assert updated is not None
-    assert updated.linked_docs.uds.endswith("uds.out")
     assert any(p.name.startswith("change_") for p in change_dir.iterdir())
 
 
@@ -285,7 +286,8 @@ def test_run_impact_update_falls_back_to_file_based_change_types(tmp_path, monke
 
     assert result["ok"] is True
     assert result["changed_function_types"]["ap_doorctrl_pds"] == "HEADER"
-    assert result["actions"]["uds"]["mode"] == "AUTO"
+    # auto_generate defaults to False, so AUTO is downgraded to FLAG
+    assert result["actions"]["uds"]["mode"] == "FLAG"
     assert result["actions"]["sts"]["mode"] == "FLAG"
 
 

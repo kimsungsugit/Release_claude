@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { post, api, defaultCacheRoot } from '../../api.js';
+import { api, defaultCacheRoot, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
 
@@ -20,11 +20,12 @@ async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg, signa
   }
 }
 
-async function pollStsProgress(jobId, action, { onMsg, signal }) {
+async function pollStsProgress(jobId, action, jobUrl, { onMsg, signal, prefix = '/api/jenkins' } = {}) {
   while (true) {
     if (signal?.aborted) return null;
-    await new Promise(r => setTimeout(r, 2000));
-    const data = await api(`/api/jenkins/${action}/progress?job_id=${encodeURIComponent(jobId)}`);
+    await new Promise(r => setTimeout(r, 3000));
+    const qs = `job_id=${encodeURIComponent(jobId)}&job_url=${encodeURIComponent(jobUrl || '')}`;
+    const data = await api(`${prefix}/${action}/progress?${qs}`);
     const p = data?.progress || data || {};
     if (p.message || p.stage) onMsg(p.message || p.stage);
     if (p.done || p.error) return p;
@@ -61,7 +62,7 @@ export default function DocGenSection({ job, analysisResult }) {
       api(`/api/jenkins/uds/list?${qs}`),
       api(`/api/jenkins/sts/list?${qs}`),
       api(`/api/jenkins/suts/list?${qs}`),
-      api(`/api/jenkins/suts/list?${qs}`).catch(() => []), // SITS uses suts endpoint as fallback
+      api('/api/local/sits/files').catch(() => ({ files: [] })),
     ]);
     setLists({
       uds: u.status === 'fulfilled' ? (u.value?.files ?? u.value ?? []) : [],
@@ -80,16 +81,53 @@ export default function DocGenSection({ job, analysisResult }) {
     setActiveTab(docType);
 
     try {
+      // Get source_root and linked_docs from SCM registry
+      const scm = analysisResult?.scmList?.[0];
+      const linkedDocs = scm?.linked_docs || {};
+
       const formData = new FormData();
       formData.append('job_url', job.url);
       formData.append('cache_root', cacheRoot);
       formData.append('build_selector', cfg.buildSelector || 'lastSuccessfulBuild');
+      if (scm?.source_root) formData.append('source_root', scm.source_root);
+      if (docPaths.template) formData.append('template_path', docPaths.template);
       if (docType === 'uds' && docPaths.template) formData.append('uds_template_path', docPaths.template);
-      if (docPaths.srs) formData.append('srs_path', docPaths.srs);
+      // Pass linked doc paths
+      const srsPath = docPaths.srs || linkedDocs.srs || '';
+      const sdsPath = docPaths.sds || linkedDocs.sds || '';
+      const hsisPath = linkedDocs.hsis || '';
+      const stpPath = linkedDocs.stp || '';
+      const udsPath = linkedDocs.uds || '';
+      // UDS uses req_paths; STS/SUTS use srs_path/sds_path
+      if (docType === 'uds') {
+        const reqPaths = [srsPath, sdsPath].filter(Boolean).join(',');
+        if (reqPaths) formData.append('req_paths', reqPaths);
+      } else {
+        if (srsPath) formData.append('srs_path', srsPath);
+        if (sdsPath) formData.append('sds_path', sdsPath);
+      }
+      if (hsisPath) formData.append('hsis_path', hsisPath);
+      if (stpPath) formData.append('stp_path', stpPath);
+      if (udsPath && docType !== 'uds') formData.append('uds_path', udsPath);
 
-      const res = await fetch(`/api/jenkins/${docType}/generate-async`, {
+      const user = getUsername();
+      // SITS uses /api/local/ endpoint with urlencoded; others use /api/jenkins/ with FormData
+      const apiPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
+      let fetchBody, fetchHeaders;
+      if (docType === 'sits') {
+        const params = new URLSearchParams();
+        for (const [k, v] of formData.entries()) params.append(k, v);
+        fetchBody = params.toString();
+        fetchHeaders = { 'Content-Type': 'application/x-www-form-urlencoded' };
+      } else {
+        fetchBody = formData;
+        fetchHeaders = {};
+      }
+      if (user) fetchHeaders['X-User'] = user;
+      const res = await fetch(`${apiPrefix}/${docType}/generate-async`, {
         method: 'POST',
-        body: formData,
+        body: fetchBody,
+        headers: fetchHeaders,
       });
       if (!res.ok) {
         const t = await res.text();
@@ -111,13 +149,15 @@ export default function DocGenSection({ job, analysisResult }) {
           signal: null,
         });
       } else {
-        progress = await pollStsProgress(data.job_id, docType, {
+        const pollPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
+        progress = await pollStsProgress(data.job_id, docType, job.url, {
           onMsg: msg => {
             setGenLog(prev => prev + msg + '\n');
             const match = msg.match(/(\d+)%/);
             if (match) setGenProgress(Number(match[1]));
           },
           signal: null,
+          prefix: pollPrefix,
         });
       }
 
@@ -132,7 +172,7 @@ export default function DocGenSection({ job, analysisResult }) {
     } finally {
       setGenerating(null);
     }
-  }, [job, cfg, cacheRoot, docPaths, toast, loadLists]);
+  }, [job, cfg, cacheRoot, docPaths, toast, loadLists, analysisResult]);
 
   return (
     <div>
@@ -218,14 +258,13 @@ function DocList({ docType, files, jobUrl, cacheRoot }) {
   const [previewLoading, setPreviewLoading] = useState(false);
   const toast = useToast();
 
+  const apiPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
+
   const loadPreview = async (filename) => {
     setPreviewLoading(true);
     try {
-      const data = await api(
-        `/api/jenkins/${docType}/view/${encodeURIComponent(filename)}` +
-        `?job_url=${encodeURIComponent(jobUrl ?? '')}` +
-        `&cache_root=${encodeURIComponent(cacheRoot ?? '')}`
-      );
+      const qs = docType === 'sits' ? '' : `?job_url=${encodeURIComponent(jobUrl ?? '')}&cache_root=${encodeURIComponent(cacheRoot ?? '')}`;
+      const data = await api(`${apiPrefix}/${docType}/view/${encodeURIComponent(filename)}${qs}`);
       setPreviewContent({ filename, data });
     } catch (e) {
       toast('error', `미리보기 실패: ${e.message}`);
@@ -273,7 +312,10 @@ function DocList({ docType, files, jobUrl, cacheRoot }) {
                 미리보기
               </button>
               <a
-                href={`/api/jenkins/${docType}/download/${encodeURIComponent(name)}?job_url=${encodeURIComponent(jobUrl ?? '')}&cache_root=${encodeURIComponent(cacheRoot ?? '')}`}
+                href={docType === 'sits'
+                  ? `/api/local/${docType}/download/${encodeURIComponent(name)}`
+                  : `/api/jenkins/${docType}/download/${encodeURIComponent(name)}?job_url=${encodeURIComponent(jobUrl ?? '')}&cache_root=${encodeURIComponent(cacheRoot ?? '')}`
+                }
                 download
                 style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', padding: '2px 4px' }}
                 title="다운로드"

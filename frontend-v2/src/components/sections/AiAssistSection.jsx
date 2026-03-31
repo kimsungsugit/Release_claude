@@ -16,6 +16,33 @@ export default function AiAssistSection({ job, analysisResult }) {
   const [topK, setTopK] = useState(5);
   const [category, setCategory] = useState('');
   const bottomRef = useRef(null);
+  const sendRef = useRef(null);
+
+  // Auto-send when a suggested question is clicked
+  useEffect(() => {
+    if (sendRef.current && !pending) {
+      const q = sendRef.current;
+      sendRef.current = null;
+      setInput('');
+      setMessages(prev => [...prev, { role: 'user', content: q }]);
+      setPending(true);
+      setMessages(prev => [...prev, { role: 'assistant', content: '', pending: true }]);
+      (async () => {
+        try {
+          const payload = { job_url: job?.url ?? '', cache_root: cacheRoot, build_selector: cfg.buildSelector || 'lastSuccessfulBuild', query: q, top_k: topK };
+          if (category) payload.categories = [category];
+          const data = await post('/api/jenkins/rag/query', payload);
+          let answer = typeof data?.answer === 'string' ? data.answer
+            : Array.isArray(data?.items) && data.items.length > 0
+              ? data.items.map((item, i) => `**[${i+1}]**${item.score != null ? ` (${(item.score*100).toFixed(0)}%)` : ''}\n${item.content ?? item.text ?? ''}\n${item.source ? `📄 ${item.source}` : ''}`).join('\n---\n')
+              : '관련 정보를 찾을 수 없습니다.';
+          setMessages(prev => { const n=[...prev]; if(n[n.length-1]?.role==='assistant') n[n.length-1]={role:'assistant',content:answer}; return n; });
+        } catch (e) {
+          setMessages(prev => { const n=[...prev]; if(n[n.length-1]?.role==='assistant') n[n.length-1]={role:'assistant',content:`오류: ${e.message}`}; return n; });
+        } finally { setPending(false); }
+      })();
+    }
+  }, [input]); // triggers when setInput(q) completes
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -198,7 +225,7 @@ export default function AiAssistSection({ job, analysisResult }) {
                   'SRS 요구사항 중 변경 영향을 받는 항목은?',
                   '커버리지가 낮은 함수 목록을 알려줘.',
                 ].map(q => (
-                  <button key={q} onClick={() => setInput(q)} style={{ textAlign: 'left', fontSize: 12 }}>
+                  <button key={q} onClick={() => { setInput(q); sendRef.current = q; }} style={{ textAlign: 'left', fontSize: 12 }}>
                     {q}
                   </button>
                 ))}

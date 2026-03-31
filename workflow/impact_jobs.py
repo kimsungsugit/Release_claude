@@ -289,8 +289,13 @@ def start_impact_job(trigger: ChangeTrigger, *, options: Optional[ImpactOptions]
         message="작업이 큐에 등록되었습니다.",
         progress={"changed_files": len(trigger.changed_files or [])},
     )
+    try:
+        from backend.user_context import wrap_with_user
+        _target = wrap_with_user(_run_job)
+    except ImportError:
+        _target = _run_job
     thread = threading.Thread(
-        target=_run_job,
+        target=_target,
         args=(job_id, trigger, options or ImpactOptions()),
         name=f"impact-job-{job_id}",
         daemon=True,

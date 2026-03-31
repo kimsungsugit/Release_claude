@@ -899,47 +899,55 @@ class VectorCASTParser:
         if "VectorCAST Report header" not in self.lines[1]:
             raise ValueError("Not a VectorCAST Report")
         
-        # Environment Name 찾기
-        env_line_no = {
-            VCASTVersion.Ver2021: 207,
-            VCASTVersion.Ver2024: 232,
-            VCASTVersion.Ver2025: 418,
-        }.get(self.version, 418)
-        
-        if env_line_no < len(self.lines):
-            for i in range(env_line_no, min(env_line_no + 10, len(self.lines))):
-                line = self.lines[i]
-                if "<tr><th>Environment Name</th>" in line:
-                    metrics_bank.environment = VIMLib.environment_name(self.lines[i + 1] if i + 1 < len(self.lines) else "")
-                    break
-        
-        # Coverage Type 찾기
-        coverage_line_no = {
-            VCASTVersion.Ver2021: 220,
-            VCASTVersion.Ver2024: 245,
-            VCASTVersion.Ver2025: 429,
-        }.get(self.version, 429)
-        
+        # Environment Name 찾기 — search entire file instead of fixed line
+        for i, line in enumerate(self.lines):
+            if "<tr><th>Environment Name</th>" in line:
+                metrics_bank.environment = VIMLib.environment_name(self.lines[i + 1] if i + 1 < len(self.lines) else "")
+                break
+
+        # Coverage Type 찾기 — search entire file for coverage_type h3 or table headers
+        coverage_line_no = -1
         mtype = MatricsType.NONE
-        if coverage_line_no < len(self.lines):
-            line = self.lines[coverage_line_no]
-            if "<h3 id=\"coverage_type\">" in line:
+
+        for i, line in enumerate(self.lines):
+            if '<h3 id="coverage_type">' in line or "<h3 id='coverage_type'>" in line:
+                coverage_line_no = i
                 coverage_text = VIMLib.get_one_td_value(line)
+                if not coverage_text and i + 1 < len(self.lines):
+                    coverage_text = VIMLib.get_one_td_value(self.lines[i + 1])
                 if "Statement" in coverage_text or "Statement+Branch" in coverage_text:
                     mtype = MatricsType.Statement
                 elif "Function" in coverage_text or "Function+Function Call" in coverage_text:
                     mtype = MatricsType.Functions
-        
+                break
+
+        # Fallback: detect type from table header columns (VectorCAST 2025 format)
+        if mtype == MatricsType.NONE:
+            for i, line in enumerate(self.lines):
+                if "col_metric" in line and ("<th" in line or "Statements" in line or "Functions" in line):
+                    if "Statements" in line or "Branches" in line:
+                        mtype = MatricsType.Statement
+                        coverage_line_no = i - 2  # approximate
+                    elif "Functions" in line or "Function Call" in line:
+                        mtype = MatricsType.Functions
+                        coverage_line_no = i - 2
+                    break
+
         if mtype == MatricsType.NONE:
             raise ValueError("Invalid Metrics Report type")
-        
+
         # 테이블 헤더 찾기
-        header_line_no = coverage_line_no + 4
+        header_line_no = max(coverage_line_no, 0) + 4
         if header_line_no >= len(self.lines):
             raise ValueError("Invalid Metrics Report format")
         
         # 데이터 행 파싱 - 테이블의 tbody 내부 행들
+        # Find actual tbody start after the metrics table header
         data_start = header_line_no + 5
+        for idx in range(max(coverage_line_no, 0), min(len(self.lines), max(coverage_line_no, 0) + 30)):
+            if "<tbody>" in self.lines[idx]:
+                data_start = idx + 1
+                break
         unit_pre = ""
         i = data_start
         
@@ -1065,19 +1073,13 @@ class VectorCASTParser:
         if "VectorCAST Report header" not in self.lines[1]:
             raise ValueError("Not a VectorCAST Report")
         
-        # Aggregate Coverage Report 확인
-        agg_title_line = {
-            VCASTVersion.Ver2021: 210,
-            VCASTVersion.Ver2024: 210,
-            VCASTVersion.Ver2025: 410,
-        }.get(self.version, 410)
-        
+        # Aggregate Coverage Report 확인 — search entire file
         is_agg_coverage = False
-        for i in range(agg_title_line, min(agg_title_line + 30, len(self.lines))):
-            if "Aggregate Coverage Report" in self.lines[i]:
+        for line in self.lines:
+            if "Aggregate Coverage Report" in line:
                 is_agg_coverage = True
                 break
-        
+
         if not is_agg_coverage:
             raise ValueError("Not an Aggregate Coverage Report")
         
@@ -1087,16 +1089,18 @@ class VectorCASTParser:
                 metrics_bank.environment = VIMLib.environment_name(self.lines[i + 1])
                 break
         
-        # Aggregate Coverage 데이터 파싱
-        agg_coverage_line = {
-            VCASTVersion.Ver2021: 250,
-            VCASTVersion.Ver2024: 250,
-            VCASTVersion.Ver2025: 438,
-        }.get(self.version, 438)
-        
+        # Aggregate Coverage 데이터 파싱 — find table start dynamically
+        agg_coverage_line = 0
+        for idx, line in enumerate(self.lines):
+            if "Aggregate Coverage" in line and ("<h2" in line or "id=" in line):
+                agg_coverage_line = idx
+                break
+        if agg_coverage_line == 0:
+            agg_coverage_line = min(100, len(self.lines))  # fallback
+
         module_name = ""
         item_count = 0
-        
+
         for i in range(agg_coverage_line, len(self.lines)):
             line = self.lines[i]
             
