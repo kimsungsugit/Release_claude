@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useJob } from '../App.jsx';
 import BuildInfoSection from '../components/sections/BuildInfoSection.jsx';
 import ScmSection from '../components/sections/ScmSection.jsx';
@@ -7,11 +7,13 @@ import SrsSdsSection from '../components/sections/SrsSdsSection.jsx';
 import DocGenSection from '../components/sections/DocGenSection.jsx';
 import AiAssistSection from '../components/sections/AiAssistSection.jsx';
 import ReportGenSection from '../components/sections/ReportGenSection.jsx';
+import ImpactGuideSection from '../components/sections/ImpactGuideSection.jsx';
 
 const SECTIONS = [
   { id: 'build',   icon: '🔨', label: '빌드 정보',    Component: BuildInfoSection },
   { id: 'scm',     icon: '🌿', label: 'SCM',          Component: ScmSection },
   { id: 'analysis',icon: '📊', label: '프로젝트 분석', Component: AnalysisSection },
+  { id: 'impact',  icon: '🔍', label: '변경 영향 가이드', Component: ImpactGuideSection },
   { id: 'srssds',  icon: '📋', label: 'SRS/SDS 매핑', Component: SrsSdsSection },
   { id: 'docgen',  icon: '📝', label: '문서 생성',     Component: DocGenSection },
   { id: 'reports', icon: '📈', label: '리포트 생성',   Component: ReportGenSection },
@@ -21,6 +23,14 @@ const SECTIONS = [
 export default function Detail() {
   const { selectedJob, analysisResult } = useJob();
   const [activeSection, setActiveSection] = useState('build');
+
+  // Allow external section navigation (from Dashboard)
+  useEffect(() => {
+    window.__detailSection = (section) => {
+      if (SECTIONS.some(s => s.id === section)) setActiveSection(section);
+    };
+    return () => { delete window.__detailSection; };
+  }, []);
 
   if (!selectedJob) {
     return (

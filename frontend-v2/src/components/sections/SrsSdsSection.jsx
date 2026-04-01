@@ -28,10 +28,11 @@ export default function SrsSdsSection({ job, analysisResult }) {
   const loadMatrix = useCallback(async () => {
     setLoading(true);
     try {
-      // Step 1: Get requirements + mapping from SRS via requirements-preview
+      // Step 1: Get requirements from SRS
       const form = new FormData();
       if (docPaths.srs) form.append('req_paths', docPaths.srs);
       const scm = analysisResult?.scmList?.[0];
+      const linkedDocs = scm?.linked_docs || {};
       if (scm?.source_root) form.append('source_root', scm.source_root);
 
       let reqItems = [];
@@ -49,21 +50,72 @@ export default function SrsSdsSection({ job, analysisResult }) {
             || previewData?.mapping || [];
         }
       } catch (e) {
-        toast('warning', `요구사항 미리보기 실패 (매핑 없이 진행): ${e.message}`);
+        toast('warning', `요구사항 미리보기 실패: ${e.message}`);
       }
 
-      // Step 2: Get VectorCAST test rows
+      // Step 2: Extract func→req mapping from UDS document
+      if (mappingPairs.length === 0 && linkedDocs.uds) {
+        try {
+          const udsMapping = await post('/api/jenkins/uds/extract-mapping', {
+            uds_path: linkedDocs.uds,
+          });
+          mappingPairs = udsMapping?.mapping_pairs || [];
+          if (mappingPairs.length > 0) {
+            toast('info', `UDS에서 ${mappingPairs.length}개 매핑 추출`);
+          }
+        } catch (_) { /* UDS 매핑 추출 실패 — 빈 매핑으로 진행 */ }
+      }
+
+      // Step 3: Collect test rows from all sources
       let vcastRows = [];
+
+      // 3a. STS traceability (요구사항↔TC 직접 매핑 — 가장 정확)
+      if (linkedDocs.sts) {
+        try {
+          const stsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.sts });
+          if (stsData?.vcast_rows?.length) {
+            vcastRows.push(...stsData.vcast_rows);
+          }
+        } catch (_) {}
+      }
+
+      // 3b. SUTS traceability
+      if (linkedDocs.suts) {
+        try {
+          const sutsData = await post('/api/jenkins/sts/extract-traceability', { path: linkedDocs.suts });
+          if (sutsData?.vcast_rows?.length) {
+            vcastRows.push(...sutsData.vcast_rows);
+          }
+        } catch (_) {}
+      }
+
+      // 3c. VectorCAST (함수 기반 — UDS 매핑 통해 연결)
       try {
         const ragData = await post('/api/jenkins/report/vectorcast-rag', {
           job_url: job.url,
           cache_root: cacheRoot,
           build_selector: cfg.buildSelector || 'lastSuccessfulBuild',
         });
-        vcastRows = ragData?.data?.test_rows || [];
-      } catch (_) { /* VectorCAST 데이터 없으면 빈 배열로 진행 */ }
+        const rawRows = ragData?.data?.test_rows || [];
 
-      // Step 3: Generate traceability matrix
+        const funcToReqs = {};
+        for (const mp of mappingPairs) {
+          for (const fn of (mp.source_ids || [])) {
+            if (!funcToReqs[fn]) funcToReqs[fn] = [];
+            funcToReqs[fn].push(mp.requirement_id);
+          }
+        }
+
+        for (const row of rawRows) {
+          const fn = row.subprogram || '';
+          const reqs = funcToReqs[fn] || [];
+          for (const rid of reqs) {
+            vcastRows.push({ ...row, requirement_id: rid, testcase: fn, source: 'VectorCAST' });
+          }
+        }
+      } catch (_) {}
+
+      // Step 4: Generate traceability matrix
       const data = await post('/api/jenkins/uds/traceability-matrix', {
         requirement_items: reqItems,
         mapping_pairs: mappingPairs,
@@ -295,22 +347,23 @@ function coverageTone(status) {
   return 'neutral';
 }
 
-function CoverageBar({ covered, partial, total }) {
+function CoverageBar({ covered, partial, total, onFilter }) {
   if (!total) return null;
   const covPct = Math.round((covered / total) * 100);
   const partPct = Math.round((partial / total) * 100);
   const uncovPct = 100 - covPct - partPct;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 200 }}>
-      <div style={{ display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', background: '#e5e7eb' }}>
-        {covPct > 0 && <div style={{ width: `${covPct}%`, background: COVERAGE_COLORS.covered.border }} />}
-        {partPct > 0 && <div style={{ width: `${partPct}%`, background: COVERAGE_COLORS.partial.border }} />}
-        {uncovPct > 0 && <div style={{ width: `${uncovPct}%`, background: COVERAGE_COLORS.uncovered.border }} />}
+      <div style={{ display: 'flex', height: 12, borderRadius: 4, overflow: 'hidden', background: '#e5e7eb', cursor: 'pointer' }}>
+        {covPct > 0 && <div onClick={() => onFilter?.('covered')} title="Covered만 보기" style={{ width: `${covPct}%`, background: COVERAGE_COLORS.covered.border }} />}
+        {partPct > 0 && <div onClick={() => onFilter?.('partial')} title="Partial만 보기" style={{ width: `${partPct}%`, background: COVERAGE_COLORS.partial.border }} />}
+        {uncovPct > 0 && <div onClick={() => onFilter?.('uncovered')} title="Uncovered만 보기" style={{ width: `${uncovPct}%`, background: COVERAGE_COLORS.uncovered.border }} />}
       </div>
       <div className="text-sm text-muted" style={{ display: 'flex', gap: 10 }}>
-        <span style={{ color: COVERAGE_COLORS.covered.fg }}>Covered {covPct}%</span>
-        {partial > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg }}>Partial {partPct}%</span>}
-        <span style={{ color: COVERAGE_COLORS.uncovered.fg }}>Uncovered {uncovPct}%</span>
+        <span style={{ color: COVERAGE_COLORS.covered.fg, cursor: 'pointer' }} onClick={() => onFilter?.('covered')}>Covered {covPct}%</span>
+        {partial > 0 && <span style={{ color: COVERAGE_COLORS.partial.fg, cursor: 'pointer' }} onClick={() => onFilter?.('partial')}>Partial {partPct}%</span>}
+        <span style={{ color: COVERAGE_COLORS.uncovered.fg, cursor: 'pointer' }} onClick={() => onFilter?.('uncovered')}>Uncovered {uncovPct}%</span>
+        <span style={{ cursor: 'pointer', opacity: 0.5 }} onClick={() => onFilter?.('all')}>전체</span>
       </div>
     </div>
   );
@@ -328,11 +381,21 @@ function TraceMatrix({ matrix }) {
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
   // Compute coverage statistics
+  // Derive status from source_ids and test_ids if not provided by API
+  const deriveStatus = (r) => {
+    if (r.status && r.status !== 'uncovered') return r.status;
+    const hasSrc = (r.source_ids ?? []).length > 0;
+    const hasTest = (r.test_ids ?? r.tests ?? []).length > 0;
+    if (hasSrc && hasTest) return 'covered';
+    if (hasSrc || hasTest) return 'partial';
+    return 'uncovered';
+  };
+
   const coverage = useMemo(() => {
     if (!rows.length) return null;
     let covered = 0, partial = 0, uncovered = 0;
     for (const r of rows) {
-      const st = r.status ?? 'uncovered';
+      const st = deriveStatus(r);
       if (st === 'covered') covered++;
       else if (st === 'partial') partial++;
       else uncovered++;
@@ -345,14 +408,14 @@ function TraceMatrix({ matrix }) {
   const filtered = useMemo(() => {
     let result = rows;
     if (statusFilter !== 'all') {
-      result = result.filter(r => (r.status ?? 'uncovered') === statusFilter);
+      result = result.filter(r => deriveStatus(r) === statusFilter);
     }
     if (searchTerm.trim()) {
       const q = searchTerm.trim().toLowerCase();
       result = result.filter(r =>
-        (r.req_id ?? r.id ?? '').toLowerCase().includes(q) ||
-        (r.function ?? r.func ?? '').toLowerCase().includes(q) ||
-        (r.file ?? r.source ?? '').toLowerCase().includes(q)
+        (r.requirement_id ?? r.req_id ?? r.id ?? '').toLowerCase().includes(q) ||
+        (r.source_ids ?? []).join(' ').toLowerCase().includes(q) ||
+        (r.test_ids ?? []).join(' ').toLowerCase().includes(q)
       );
     }
     return result;
@@ -368,48 +431,115 @@ function TraceMatrix({ matrix }) {
 
   return (
     <div>
-      {/* Coverage stats */}
+      {/* Coverage summary table */}
       {coverage && (
-        <div className="stats-row" style={{ marginBottom: 12 }}>
-          <div className="stat-card">
-            <div className="text-muted text-sm">전체 요구사항</div>
-            <div style={{ fontSize: 20, fontWeight: 700 }}>{coverage.total}</div>
+        <div style={{ marginBottom: 16, border: '1px solid var(--border)', borderRadius: 8, overflow: 'hidden' }}>
+          {/* Header */}
+          <div style={{ padding: '10px 14px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', fontWeight: 600, fontSize: 13 }}>
+            추적성 요약
           </div>
-          <div className="stat-card" style={{ borderLeft: `3px solid ${COVERAGE_COLORS.covered.border}` }}>
-            <div className="text-muted text-sm">커버됨</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: COVERAGE_COLORS.covered.fg }}>{coverage.covered}</div>
-          </div>
-          {coverage.partial > 0 && (
-            <div className="stat-card" style={{ borderLeft: `3px solid ${COVERAGE_COLORS.partial.border}` }}>
-              <div className="text-muted text-sm">부분</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: COVERAGE_COLORS.partial.fg }}>{coverage.partial}</div>
-            </div>
-          )}
-          <div className="stat-card" style={{ borderLeft: `3px solid ${COVERAGE_COLORS.uncovered.border}` }}>
-            <div className="text-muted text-sm">미커버</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color: COVERAGE_COLORS.uncovered.fg }}>{coverage.uncovered}</div>
-          </div>
-          <div className="stat-card">
-            <div className="text-muted text-sm">커버리지</div>
-            <div style={{ fontSize: 20, fontWeight: 700 }}>{coverage.pct}%</div>
-          </div>
+
+          {/* Summary table */}
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: 'var(--bg)' }}>
+                <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '1px solid var(--border)' }}>구분</th>
+                <th style={{ padding: '8px 12px', textAlign: 'center', borderBottom: '1px solid var(--border)', width: 80 }}>건수</th>
+                <th style={{ padding: '8px 12px', textAlign: 'center', borderBottom: '1px solid var(--border)', width: 80 }}>비율</th>
+                <th style={{ padding: '8px 12px', textAlign: 'left', borderBottom: '1px solid var(--border)' }}>설명</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={{ padding: '6px 12px', fontWeight: 600 }}>전체 요구사항 (SRS)</td>
+                <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14 }}>{coverage.total}</td>
+                <td style={{ padding: '6px 12px', textAlign: 'center' }}>100%</td>
+                <td style={{ padding: '6px 12px', color: 'var(--text-muted)' }}>SRS 문서에서 추출된 요구사항</td>
+              </tr>
+              <tr style={{ background: COVERAGE_COLORS.covered.bg }}>
+                <td style={{ padding: '6px 12px', fontWeight: 600, color: COVERAGE_COLORS.covered.fg }}>
+                  Covered (설계+테스트 완료)
+                </td>
+                <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.covered.fg }}>{coverage.covered}</td>
+                <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.covered.fg }}>{coverage.pct}%</td>
+                <td style={{ padding: '6px 12px', fontSize: 11 }}>UDS 소스 매핑 + STS/VectorCAST 테스트 매핑 모두 존재</td>
+              </tr>
+              {coverage.partial > 0 && (
+                <tr style={{ background: COVERAGE_COLORS.partial.bg }}>
+                  <td style={{ padding: '6px 12px', fontWeight: 600, color: COVERAGE_COLORS.partial.fg }}>
+                    Partial (테스트만 존재)
+                  </td>
+                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.partial.fg }}>{coverage.partial}</td>
+                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.partial.fg }}>{Math.round(coverage.partial / coverage.total * 100)}%</td>
+                  <td style={{ padding: '6px 12px', fontSize: 11 }}>STS 테스트 매핑 있으나 UDS 소스 매핑 없음 (비기능/HW/시스템 레벨 요구사항)</td>
+                </tr>
+              )}
+              {coverage.uncovered > 0 && (
+                <tr style={{ background: COVERAGE_COLORS.uncovered.bg }}>
+                  <td style={{ padding: '6px 12px', fontWeight: 600, color: COVERAGE_COLORS.uncovered.fg }}>
+                    Uncovered (미추적)
+                  </td>
+                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 700, fontSize: 14, color: COVERAGE_COLORS.uncovered.fg }}>{coverage.uncovered}</td>
+                  <td style={{ padding: '6px 12px', textAlign: 'center', fontWeight: 600, color: COVERAGE_COLORS.uncovered.fg }}>{Math.round(coverage.uncovered / coverage.total * 100)}%</td>
+                  <td style={{ padding: '6px 12px', fontSize: 11 }}>설계 및 테스트 매핑 모두 없음</td>
+                </tr>
+              )}
+            </tbody>
+            <tfoot>
+              <tr style={{ borderTop: '2px solid var(--border)', background: 'var(--bg)' }}>
+                <td style={{ padding: '8px 12px', fontWeight: 700 }}>SW 구현 대상 커버리지</td>
+                <td style={{ padding: '8px 12px', textAlign: 'center', fontWeight: 700, fontSize: 16, color: 'var(--color-success)' }}>
+                  {coverage.covered}/{coverage.covered + coverage.uncovered}
+                </td>
+                <td style={{ padding: '8px 12px', textAlign: 'center', fontWeight: 700, fontSize: 16, color: 'var(--color-success)' }}>
+                  {coverage.covered + coverage.uncovered > 0 ? Math.round(coverage.covered / (coverage.covered + coverage.uncovered) * 100) : 0}%
+                </td>
+                <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
+                  UDS에 설계된 SW 구현 대상 기준 (Partial 제외)
+                </td>
+              </tr>
+              <tr style={{ background: 'var(--bg)' }}>
+                <td style={{ padding: '8px 12px', fontWeight: 700 }}>테스트 추적 커버리지</td>
+                <td style={{ padding: '8px 12px', textAlign: 'center', fontWeight: 700, fontSize: 16, color: 'var(--color-success)' }}>
+                  {summary?.mapped_test_count ?? (coverage.covered + coverage.partial)}/{coverage.total}
+                </td>
+                <td style={{ padding: '8px 12px', textAlign: 'center', fontWeight: 700, fontSize: 16, color: 'var(--color-success)' }}>
+                  {Math.round(((summary?.mapped_test_count ?? (coverage.covered + coverage.partial)) / coverage.total) * 100)}%
+                </td>
+                <td style={{ padding: '8px 12px', fontSize: 11, color: 'var(--text-muted)' }}>
+                  STS/SUTS/VectorCAST 테스트 매핑 기준
+                </td>
+              </tr>
+            </tfoot>
+          </table>
         </div>
       )}
 
       {/* Coverage bar */}
       {coverage && (
         <div style={{ marginBottom: 12 }}>
-          <CoverageBar covered={coverage.covered} partial={coverage.partial} total={coverage.total} />
+          <CoverageBar covered={coverage.covered} partial={coverage.partial} total={coverage.total}
+            onFilter={(status) => { setStatusFilter(status === 'all' ? 'all' : status); setVisibleCount(PAGE_SIZE); }} />
         </div>
       )}
 
-      {/* Summary pills (from API) */}
+      {/* Data sources */}
       {summary && (
-        <div className="row" style={{ marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
-          {Object.entries(summary).map(([k, v]) => (
-            <span key={k} className="pill pill-info">{k}: {v}</span>
-          ))}
-        </div>
+        <details style={{ marginBottom: 12 }}>
+          <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600 }}>데이터 소스 상세</summary>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>설계 추적 (UDS)</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_source_count ?? coverage.covered} / {coverage.total}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>UDS 함수 → 요구사항 매핑</div>
+            </div>
+            <div style={{ padding: 8, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>테스트 추적 (STS+VCast)</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{summary.mapped_test_count ?? (coverage.covered + coverage.partial)} / {coverage.total}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>STS TC + VectorCAST → 요구사항 매핑</div>
+            </div>
+          </div>
+        </details>
       )}
 
       {/* Search and filter bar */}
@@ -445,30 +575,67 @@ function TraceMatrix({ matrix }) {
       </div>
 
       {/* Matrix table */}
-      <table className="impact-table">
+      <div style={{ overflowX: 'auto' }}>
+      <table className="impact-table" style={{ minWidth: 700 }}>
         <thead>
           <tr>
-            <th>요구사항 ID</th>
-            <th>함수</th>
-            <th>파일</th>
-            <th>상태</th>
+            <th rowSpan={2} style={{ verticalAlign: 'middle', width: 100 }}>요구사항 ID</th>
+            <th colSpan={1} style={{ textAlign: 'center', background: 'var(--bg)', borderBottom: '1px solid var(--border)' }}>설계</th>
+            <th colSpan={2} style={{ textAlign: 'center', background: 'var(--bg)', borderBottom: '1px solid var(--border)' }}>검증</th>
+            <th rowSpan={2} style={{ verticalAlign: 'middle', width: 80 }}>상태</th>
+          </tr>
+          <tr>
+            <th style={{ fontSize: 10 }}>UDS 함수</th>
+            <th style={{ fontSize: 10 }}>STS TC</th>
+            <th style={{ fontSize: 10 }}>VectorCAST</th>
           </tr>
         </thead>
         <tbody>
           {displayedRows.map((r, i) => {
-            const status = r.status ?? 'uncovered';
+            const status = deriveStatus(r);
             const colors = COVERAGE_COLORS[status] || {};
+            const srcFuncs = r.source_ids ?? [];
+            const allTests = r.test_ids ?? r.tests ?? [];
+            // Separate STS vs VectorCAST tests
+            const rawTests = Array.isArray(r.tests) ? r.tests : [];
+            const stsTests = rawTests.filter(t => (t.source || '') === 'STS' || (t.source || '') === 'SUTS');
+            const vcastTests = rawTests.filter(t => (t.source || '') === 'VectorCAST' || (!(t.source || '').includes('STS') && !(t.source || '').includes('SUTS')));
+            const stsCount = stsTests.length || (allTests.length > 0 && rawTests.length === 0 ? allTests.length : 0);
+            const vcastCount = vcastTests.length;
+
             return (
               <tr key={i} style={{ background: colors.bg }}>
-                <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.req_id ?? r.id ?? '-'}</td>
-                <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.function ?? r.func ?? '-'}</td>
-                <td className="text-sm">{r.file ?? r.source ?? '-'}</td>
-                <td><StatusBadge tone={coverageTone(status)}>{status}</StatusBadge></td>
+                <td style={{ fontFamily: 'monospace', fontSize: 11, fontWeight: 600 }}>
+                  {r.requirement_id ?? r.req_id ?? r.id ?? '-'}
+                </td>
+                <td style={{ fontSize: 10, maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                    title={srcFuncs.join(', ')}>
+                  {srcFuncs.length > 0
+                    ? <><span className="pill pill-info" style={{ fontSize: 9 }}>{srcFuncs.length}</span> {srcFuncs.slice(0, 3).join(', ')}{srcFuncs.length > 3 ? '...' : ''}</>
+                    : <span className="text-muted">-</span>
+                  }
+                </td>
+                <td style={{ fontSize: 10, textAlign: 'center' }}>
+                  {stsCount > 0
+                    ? <span className="pill pill-success" style={{ fontSize: 9 }}>{stsCount} TC</span>
+                    : <span className="text-muted">-</span>
+                  }
+                </td>
+                <td style={{ fontSize: 10, textAlign: 'center' }}>
+                  {vcastCount > 0
+                    ? <span className="pill pill-info" style={{ fontSize: 9 }}>{vcastCount}</span>
+                    : <span className="text-muted">-</span>
+                  }
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  <StatusBadge tone={coverageTone(status)}>{status}</StatusBadge>
+                </td>
               </tr>
             );
           })}
         </tbody>
       </table>
+      </div>
 
       {/* Show more / pagination */}
       {hasMore && (

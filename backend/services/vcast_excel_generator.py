@@ -262,7 +262,9 @@ class XlsxManager:
             return
         
         col_letter = get_column_letter(col)
-        self.worksheet.column_dimensions[col_letter].width = width / 7.0  # Excel 단위 변환
+        # C# ClosedXML uses width * 0.2; openpyxl uses character width
+        # Match C# output: pixel * 0.2 + 0.71 (ClosedXML padding)
+        self.worksheet.column_dimensions[col_letter].width = width * 0.2 + 0.71
     
     def set_row_height(self, row: int, height: int) -> None:
         """행 높이 설정"""
@@ -518,10 +520,17 @@ def generate_testcase_excel(tcbank: TCBank, output_path: Path, mode: str = "Test
     # 테이블 포맷 설정
     _set_table_format(excel, col_offset, row_offset, current_row - 1, col_count)
     
-    # 열 너비 설정
-    for col in range(col_offset, col_offset + col_count):
-        excel.set_column_width(col, 15)
-    
+    # 열 너비 설정 (C# 기준: base=[1,60,100,150,20] + data=80 each + last=150)
+    excel.set_column_width(1, 1)  # spacer col A
+    base_widths = [60, 100, 150, 20]  # TC Index, TC ID, Unit, TC Gen Method
+    for i, w in enumerate(base_widths):
+        excel.set_column_width(col_offset + i, w)
+    # Data columns (Input, Expected, Actual, etc.) = 80 each
+    for col in range(col_offset + len(base_widths), col_offset + col_count - 1):
+        excel.set_column_width(col, 80)
+    # Last column (Related ID / Log) = 150
+    excel.set_column_width(col_offset + col_count - 1, 150)
+
     return excel.close(True)
 
 
@@ -694,9 +703,10 @@ def _generate_ut_metrics_sheet(
     excel.apply_style(1, 1, 1, col_count, XlsCellStyle.Title)
     excel.merge(1, 1, 1, col_count)
     
-    # 열 너비 설정
-    for col in range(col_offset, col_offset + col_count):
-        excel.set_column_width(col, 15)
+    # 열 너비 설정 (C# 기준: [40,100,100,250,80, 80,80,80, 80,80,80, 80, 80,80,80])
+    ut_widths = [40, 100, 100, 250, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80, 80]
+    for i, w in enumerate(ut_widths):
+        excel.set_column_width(col_offset + i, w)
 
 
 def _generate_it_metrics_sheet(
@@ -779,7 +789,9 @@ def _generate_it_metrics_sheet(
     excel.write_data(1, 1, "IT Matrics")
     excel.apply_style(1, 1, 1, col_count, XlsCellStyle.Title)
     excel.merge(1, 1, 1, col_count)
-    
-    # 열 너비 설정
-    for col in range(col_offset, col_offset + col_count):
-        excel.set_column_width(col, 15)
+
+    # 열 너비 설정 (C# 기준: [40,250,100,300,80,140,140])
+    it_widths = [40, 250, 100, 300, 80, 140, 140]
+    for i, w in enumerate(it_widths):
+        if col_offset + i <= col_offset + col_count - 1:
+            excel.set_column_width(col_offset + i, w)

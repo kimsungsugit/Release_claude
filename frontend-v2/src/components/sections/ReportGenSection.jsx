@@ -6,7 +6,7 @@ import StatusBadge from '../StatusBadge.jsx';
 const TABS = [
   { key: 'qac', label: '정적 분석 (QAC/PRQA)', icon: '📊' },
   { key: 'vcast', label: '동적 분석 (VectorCAST)', icon: '🧪' },
-  { key: 'compare', label: 'Excel 비교', icon: '🔄' },
+  // { key: 'compare', label: 'Excel 비교', icon: '🔄' },  // hidden for now
 ];
 
 export default function ReportGenSection({ job, analysisResult }) {
@@ -50,6 +50,31 @@ function QACPanel({ job, analysisResult }) {
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [generatedFile, setGeneratedFile] = useState(null);
+  const [scanFolder, setScanFolder] = useState('');
+  const [reports, setReports] = useState([]);
+
+  const loadReports = useCallback(async () => {
+    try {
+      const data = await api('/api/qac/reports');
+      setReports(data?.reports ?? []);
+    } catch (_) {}
+  }, []);
+  const [scanLoading, setScanLoading] = useState(false);
+
+  const scanFolderFiles = useCallback(async () => {
+    if (!scanFolder.trim()) { toast('warning', '폴더 경로를 입력하세요.'); return; }
+    setScanLoading(true);
+    try {
+      const data = await post('/api/qac/scan-folder', { folder: scanFolder.trim() });
+      setArtifacts(data?.items ?? []);
+      if ((data?.items ?? []).length === 0) toast('info', 'QAC HTML 파일을 찾지 못했습니다.');
+      else toast('success', `${data.items.length}개 파일 발견`);
+    } catch (e) {
+      toast('error', `폴더 스캔 실패: ${e.message}`);
+    } finally {
+      setScanLoading(false);
+    }
+  }, [scanFolder, toast]);
 
   const loadArtifacts = useCallback(async () => {
     setLoading(true);
@@ -67,10 +92,20 @@ function QACPanel({ job, analysisResult }) {
   const generateExcel = useCallback(async (artifactPath) => {
     setGenerating(true);
     try {
-      const qs = `job_url=${encodeURIComponent(job?.url ?? '')}&cache_root=${encodeURIComponent(cacheRoot)}&rel_path=${encodeURIComponent(artifactPath)}`;
-      const url = `/api/qac/jenkins-excel?${qs}`;
-      // API returns FileResponse directly — download via fetch + blob
-      const res = await fetch(url);
+      // If path is absolute (from folder scan), use path-based API; otherwise Jenkins API
+      const isAbsPath = artifactPath.includes(':') || artifactPath.startsWith('/') || artifactPath.startsWith('\\');
+      let res;
+      if (isAbsPath) {
+        const user = getUsername();
+        res = await fetch('/api/qac/generate-excel-from-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(user ? { 'X-User': user } : {}) },
+          body: JSON.stringify({ path: artifactPath }),
+        });
+      } else {
+        const qs = `job_url=${encodeURIComponent(job?.url ?? '')}&cache_root=${encodeURIComponent(cacheRoot)}&rel_path=${encodeURIComponent(artifactPath)}`;
+        res = await fetch(`/api/qac/jenkins-excel?${qs}`);
+      }
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || `HTTP ${res.status}`);
@@ -132,8 +167,24 @@ function QACPanel({ job, analysisResult }) {
     <div className="panel">
       <div className="panel-header">
         <span className="panel-title">정적 분석 리포트 (QAC/PRQA)</span>
-        <button className="btn-sm" onClick={loadArtifacts} disabled={loading}>
-          {loading ? <span className="spinner" /> : 'Jenkins 아티팩트'}
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button className="btn-sm" onClick={loadReports}>산출물 목록</button>
+          <button className="btn-sm" onClick={loadArtifacts} disabled={loading}>
+            {loading ? <span className="spinner" /> : 'Jenkins 아티팩트'}
+          </button>
+        </div>
+      </div>
+
+      {/* Folder scan */}
+      <div className="row" style={{ gap: 8, marginBottom: 12, alignItems: 'flex-end' }}>
+        <div style={{ flex: 1 }}>
+          <label style={{ fontSize: 11, fontWeight: 600 }}>폴더 경로 (하위 폴더 자동 스캔)</label>
+          <input type="text" value={scanFolder} onChange={e => setScanFolder(e.target.value)}
+            placeholder="D:\path\to\PRQA\reports" style={{ fontSize: 12, width: '100%' }}
+            onKeyDown={e => e.key === 'Enter' && scanFolderFiles()} />
+        </div>
+        <button className="btn-primary btn-sm" onClick={scanFolderFiles} disabled={scanLoading} style={{ height: 34, whiteSpace: 'nowrap' }}>
+          {scanLoading ? '스캔 중...' : '폴더 스캔'}
         </button>
       </div>
 
@@ -191,7 +242,7 @@ function QACPanel({ job, analysisResult }) {
                     {name.length > 60 ? `...${name.slice(-57)}` : name}
                   </span>
                   <span className="pill pill-neutral" style={{ fontSize: 10 }}>{ext?.toUpperCase()}</span>
-                  {isHtml && (
+                  {(isHtml && (f.can_parse !== false)) && (
                     <button
                       className="btn-primary btn-sm"
                       onClick={() => generateExcel(path)}
@@ -251,6 +302,25 @@ function QACPanel({ job, analysisResult }) {
           </div>
         </div>
       )}
+
+      {/* Generated reports list */}
+      {reports.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>생성된 산출물 ({reports.length}개)</div>
+          <div className="artifact-list" style={{ maxHeight: 200, overflowY: 'auto' }}>
+            {reports.map((f, i) => (
+              <div key={i} className="artifact-item" style={{ padding: '5px 8px' }}>
+                <span className="artifact-icon">📊</span>
+                <span className="artifact-name" style={{ flex: 1, fontSize: 11 }}>{f.name}</span>
+                <span className="text-muted" style={{ fontSize: 10 }}>{f.created?.slice(0, 10)}</span>
+                <span className="text-muted" style={{ fontSize: 10, marginLeft: 4 }}>{Math.round((f.size || 0) / 1024)}KB</span>
+                <a href={`/api/qac/reports/${encodeURIComponent(f.name)}`} download
+                  style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', marginLeft: 6 }}>↓</a>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -267,6 +337,24 @@ function VCastPanel({ job, analysisResult }) {
   const [parsing, setParsing] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [reports, setReports] = useState([]);
+  const [scanFolder, setScanFolder] = useState('');
+  const [scanFiles, setScanFiles] = useState([]);
+  const [scanLoading, setScanLoading] = useState(false);
+
+  const scanFolderFiles = useCallback(async () => {
+    if (!scanFolder.trim()) { toast('warning', '폴더 경로를 입력하세요.'); return; }
+    setScanLoading(true);
+    try {
+      const data = await post('/api/vcast/scan-folder', { folder: scanFolder.trim() });
+      setScanFiles(data?.items ?? []);
+      if ((data?.items ?? []).length === 0) toast('info', 'VectorCAST HTML 파일을 찾지 못했습니다.');
+      else toast('success', `${data.items.length}개 파일 발견`);
+    } catch (e) {
+      toast('error', `폴더 스캔 실패: ${e.message}`);
+    } finally {
+      setScanLoading(false);
+    }
+  }, [scanFolder, toast]);
 
   const parseJenkins = useCallback(async () => {
     setParsing(true);
@@ -375,7 +463,37 @@ function VCastPanel({ job, analysisResult }) {
     <div className="panel">
       <div className="panel-header">
         <span className="panel-title">동적 분석 리포트 (VectorCAST)</span>
+        <button className="btn-sm" onClick={loadReports}>산출물 목록</button>
       </div>
+
+      {/* Folder scan */}
+      <div className="row" style={{ gap: 8, marginBottom: 12, alignItems: 'flex-end' }}>
+        <div style={{ flex: 1 }}>
+          <label style={{ fontSize: 11, fontWeight: 600 }}>폴더 경로 (하위 폴더 자동 스캔)</label>
+          <input type="text" value={scanFolder} onChange={e => setScanFolder(e.target.value)}
+            placeholder="D:\path\to\VectorCAST\reports" style={{ fontSize: 12, width: '100%' }}
+            onKeyDown={e => e.key === 'Enter' && scanFolderFiles()} />
+        </div>
+        <button className="btn-primary btn-sm" onClick={scanFolderFiles} disabled={scanLoading} style={{ height: 34, whiteSpace: 'nowrap' }}>
+          {scanLoading ? '스캔 중...' : '폴더 스캔'}
+        </button>
+      </div>
+
+      {/* Scan results */}
+      {scanFiles.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>스캔 결과 ({scanFiles.length}개)</div>
+          <div className="artifact-list" style={{ maxHeight: 200, overflowY: 'auto' }}>
+            {scanFiles.map((f, i) => (
+              <div key={i} className="artifact-item" style={{ padding: '4px 8px' }}>
+                <span className="artifact-icon">📄</span>
+                <span className="artifact-name" style={{ flex: 1, fontSize: 11 }} title={f.path}>{f.name}</span>
+                <span className="pill pill-info" style={{ fontSize: 9 }}>{f.kind}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* VectorCAST summary from analysis */}
       {vc && (
@@ -455,21 +573,25 @@ function VCastPanel({ job, analysisResult }) {
       {reports.length > 0 && (
         <div>
           <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>
-            생성된 리포트 ({reports.length}개)
+            생성된 산출물 ({reports.length}개)
           </div>
-          <div className="artifact-list">
+          <div className="artifact-list" style={{ maxHeight: 200, overflowY: 'auto' }}>
             {reports.map((f, i) => {
               const name = typeof f === 'string' ? f : (f.name ?? f.filename ?? '');
+              const size = typeof f === 'object' ? f.size : 0;
+              const created = typeof f === 'object' ? (f.created || '') : '';
               return (
-                <div key={i} className="artifact-item" style={{ padding: '6px 8px' }}>
+                <div key={i} className="artifact-item" style={{ padding: '5px 8px' }}>
                   <span className="artifact-icon">📊</span>
-                  <span className="artifact-name" style={{ flex: 1 }}>{name}</span>
+                  <span className="artifact-name" style={{ flex: 1, fontSize: 11 }}>{name}</span>
+                  {created && <span className="text-muted" style={{ fontSize: 10 }}>{created.slice(0, 10)}</span>}
+                  {size > 0 && <span className="text-muted" style={{ fontSize: 10, marginLeft: 4 }}>{Math.round(size / 1024)}KB</span>}
                   <a
                     href={`/api/vcast/reports/${encodeURIComponent(name)}`}
                     download
                     style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', padding: '2px 6px' }}
                   >
-                    다운로드
+                    ↓
                   </a>
                 </div>
               );

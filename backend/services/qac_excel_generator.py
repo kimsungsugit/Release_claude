@@ -184,8 +184,8 @@ def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
     # 일반 데이터 스타일 적용
     excel.apply_style(row_offset + 2, col_offset, current_row - 1, col_offset + col_count - 1, XlsCellStyle.General)
 
-    # 열 너비 설정
-    widths = [80, 300] + [80] * len(matrix_list) + [500]
+    # 열 너비 설정 (C# 출력 기준: A=80, B=300, C=80, D/E/F=60, G=500)
+    widths = [80, 300, 80, 60, 60, 60, 500]
     for col in range(col_offset, col_offset + col_count):
         if col - col_offset < len(widths):
             excel.set_column_width(col, widths[col - col_offset])

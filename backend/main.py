@@ -135,16 +135,21 @@ if (_frontend_dist / "index.html").exists():
     from fastapi.staticfiles import StaticFiles  # noqa: E402
     from fastapi.responses import FileResponse  # noqa: E402
 
-    _assets_dir = _frontend_dist / "assets"
-    if _assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="frontend_assets")
+    import mimetypes
+    mimetypes.add_type("application/javascript", ".js")
+    mimetypes.add_type("text/css", ".css")
+    mimetypes.add_type("image/svg+xml", ".svg")
 
-    # Serve favicon
-    _favicon = _frontend_dist / "favicon.svg"
-    if _favicon.exists():
-        @app.get("/favicon.svg")
-        async def _favicon_svg():
-            return FileResponse(str(_favicon), media_type="image/svg+xml")
+    # Serve entire dist as static files (proper MIME types)
+    app.mount("/assets", StaticFiles(directory=str(_frontend_dist / "assets")), name="frontend_assets")
+
+    # Serve favicon and other root-level static files
+    @app.get("/favicon.svg")
+    async def _favicon_svg():
+        p = _frontend_dist / "favicon.svg"
+        if p.exists():
+            return FileResponse(str(p), media_type="image/svg+xml")
+        raise HTTPException(status_code=404)
 
     # Explicit 404 for unmatched API routes (prevents SPA fallback masking)
     @app.get("/api/{api_path:path}")

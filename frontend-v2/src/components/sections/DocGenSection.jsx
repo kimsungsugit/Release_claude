@@ -1,7 +1,6 @@
 import { useState, useCallback } from 'react';
-import { api, defaultCacheRoot, getUsername } from '../../api.js';
+import { api, post, defaultCacheRoot, getUsername } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
-import StatusBadge from '../StatusBadge.jsx';
 
 async function pollProgress(jobUrl, buildSelector, jobId, action, { onMsg, signal }) {
   while (true) {
@@ -46,31 +45,13 @@ export default function DocGenSection({ job, analysisResult }) {
   const toast = useToast();
   const cacheRoot = analysisResult?.cacheRoot || defaultCacheRoot(job?.url) || cfg.cacheRoot;
 
-  const [lists, setLists] = useState({ uds: [], sts: [], suts: [], sits: [] });
-  const [generating, setGenerating] = useState(null); // which doc type is generating
+  const [generating, setGenerating] = useState(null);
   const [genLog, setGenLog] = useState('');
   const [genProgress, setGenProgress] = useState(null);
-  const [activeTab, setActiveTab] = useState('uds');
 
   const docPaths = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
   })();
-
-  const loadLists = useCallback(async () => {
-    const qs = `job_url=${encodeURIComponent(job?.url ?? '')}&cache_root=${encodeURIComponent(cacheRoot ?? '')}`;
-    const [u, s, su, si] = await Promise.allSettled([
-      api(`/api/jenkins/uds/list?${qs}`),
-      api(`/api/jenkins/sts/list?${qs}`),
-      api(`/api/jenkins/suts/list?${qs}`),
-      api('/api/local/sits/files').catch(() => ({ files: [] })),
-    ]);
-    setLists({
-      uds: u.status === 'fulfilled' ? (u.value?.files ?? u.value ?? []) : [],
-      sts: s.status === 'fulfilled' ? (s.value?.files ?? s.value ?? []) : [],
-      suts: su.status === 'fulfilled' ? (su.value?.files ?? su.value ?? []) : [],
-      sits: si.status === 'fulfilled' ? (si.value?.files ?? si.value ?? []) : [],
-    });
-  }, [job, cacheRoot]);
 
   const generateDoc = useCallback(async (docType) => {
     if (!job?.url) { toast('warning', '프로젝트를 먼저 선택하세요.'); return; }
@@ -165,22 +146,111 @@ export default function DocGenSection({ job, analysisResult }) {
 
       toast('success', `${label} 생성 완료`);
       setGenLog(prev => prev + `✓ ${label} 생성 완료\n`);
-      loadLists();
     } catch (e) {
       toast('error', `${label} 생성 실패: ${e.message}`);
       setGenLog(prev => prev + `✕ 오류: ${e.message}\n`);
     } finally {
       setGenerating(null);
     }
-  }, [job, cfg, cacheRoot, docPaths, toast, loadLists, analysisResult]);
+  }, [job, cfg, cacheRoot, docPaths, toast, analysisResult]);
+
+  const scm = analysisResult?.scmList?.[0];
+  const linkedDocs = scm?.linked_docs || {};
+  const localDocPaths = (() => {
+    try { return JSON.parse(localStorage.getItem('devops_v2_doc_paths') || '{}'); } catch (_) { return {}; }
+  })();
+
+  // Merge input docs: SCM linked_docs + localStorage
+  const inputDocs = [
+    { key: 'srs', label: 'SRS', desc: '소프트웨어 요구사항 사양서', path: localDocPaths.srs || linkedDocs.srs || '' },
+    { key: 'sds', label: 'SDS', desc: '소프트웨어 설계 사양서', path: localDocPaths.sds || linkedDocs.sds || '' },
+    { key: 'hsis', label: 'HSIS', desc: 'HW/SW 인터페이스 사양서', path: linkedDocs.hsis || '' },
+    { key: 'stp', label: 'STP', desc: '소프트웨어 시험 계획서', path: linkedDocs.stp || '' },
+  ];
+  const outputDocs = [
+    { key: 'uds', label: 'UDS', desc: 'Unit Design Specification', path: linkedDocs.uds || '' },
+    { key: 'sts', label: 'STS', desc: 'Software Test Specification', path: linkedDocs.sts || '' },
+    { key: 'suts', label: 'SUTS', desc: 'SW Unit Test Specification', path: linkedDocs.suts || '' },
+    { key: 'sits', label: 'SITS', desc: 'SW Integration Test Spec', path: linkedDocs.sits || '' },
+  ];
+
+  const [docPreview, setDocPreview] = useState(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewSheet, setPreviewSheet] = useState(0);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  const allDocs = [
+    { key: 'sds', label: 'SDS', type: 'input', path: localDocPaths.sds || linkedDocs.sds || '' },
+    { key: 'uds', label: 'UDS', type: 'output', path: linkedDocs.uds || '' },
+    { key: 'sts', label: 'STS', type: 'output', path: linkedDocs.sts || '' },
+    { key: 'suts', label: 'SUTS', type: 'output', path: linkedDocs.suts || '' },
+    { key: 'sits', label: 'SITS', type: 'output', path: linkedDocs.sits || '' },
+  ];
+
+  const loadDocPreview = useCallback(async (docKey, path) => {
+    if (!path) { toast('warning', '문서 경로가 등록되지 않았습니다.'); return; }
+    setPreviewLoading(true);
+    setDocPreview(null);
+    setPreviewSheet(0);
+    try {
+      const filename = path.split(/[\\/]/).pop();
+      // Use generic Excel preview API for all document types
+      const data = await post('/api/preview-excel', { path });
+      setDocPreview({ key: docKey, label: allDocs.find(d => d.key === docKey)?.label || docKey.toUpperCase(), filename, data, _path: path });
+    } catch (e) {
+      toast('error', `문서 미리보기 실패: ${e.message}`);
+    } finally {
+      setPreviewLoading(false);
+    }
+  }, [toast]);
 
   return (
     <div>
+      {/* Document list - clickable for preview */}
+      <div className="panel" style={{ marginBottom: 12 }}>
+        <div className="panel-header">
+          <span className="panel-title">문서 현황</span>
+        </div>
+        <table className="impact-table" style={{ fontSize: 11 }}>
+          <thead>
+            <tr><th style={{ width: 55 }}>문서</th><th>파일명</th><th style={{ width: 60 }}>상태</th><th style={{ width: 60 }}></th></tr>
+          </thead>
+          <tbody>
+            {allDocs.map(d => (
+              <tr key={d.key} style={{ cursor: d.path ? 'pointer' : 'default' }}
+                  onClick={() => d.path && loadDocPreview(d.key, d.path)}>
+                <td><span className={`pill ${d.type === 'input' ? 'pill-info' : 'pill-purple'}`} style={{ fontSize: 9 }}>{d.label}</span></td>
+                <td style={{ fontFamily: 'monospace', fontSize: 10 }} title={d.path}>
+                  {d.path ? d.path.split(/[\\/]/).pop() : <span className="text-muted">미등록</span>}
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  {d.path ? <span className="pill pill-success" style={{ fontSize: 9 }}>등록됨</span> : <span className="pill pill-neutral" style={{ fontSize: 9 }}>-</span>}
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  {d.path && <button className="btn-sm" style={{ fontSize: 9, padding: '1px 6px' }}
+                    onClick={e => { e.stopPropagation(); loadDocPreview(d.key, d.path); }}
+                    disabled={previewLoading}>보기</button>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Document preview */}
+      {docPreview && <DocPreviewPanel
+        docPreview={docPreview}
+        previewSheet={previewSheet}
+        setPreviewSheet={setPreviewSheet}
+        fullscreen={fullscreen}
+        setFullscreen={setFullscreen}
+        onClose={() => { setDocPreview(null); setFullscreen(false); }}
+      />}
+
       {/* Generation controls */}
       <div className="panel">
         <div className="panel-header">
           <span className="panel-title">문서 생성</span>
-          <button className="btn-sm" onClick={loadLists} disabled={!!generating}>목록 새로고침</button>
         </div>
 
         <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
@@ -216,130 +286,124 @@ export default function DocGenSection({ job, analysisResult }) {
         )}
       </div>
 
-      {/* Document lists - tabbed */}
-      <div className="panel mt-3">
-        <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 12 }}>
-          {DOC_TYPES.map(dt => (
-            <button
-              key={dt.key}
-              onClick={() => setActiveTab(dt.key)}
+    </div>
+  );
+}
+
+/* ── Document Preview Panel (inline / fullscreen) ── */
+function DocPreviewPanel({ docPreview, previewSheet, setPreviewSheet, fullscreen, setFullscreen, onClose }) {
+  const sheets = docPreview.data?.sheets || [];
+  const sheet = sheets[previewSheet];
+  const [page, setPage] = useState(0);
+  const pageSize = fullscreen ? 200 : 100;
+  const docPath = docPreview.data?.filename ? undefined : undefined; // path from allDocs
+
+  // Reset page when switching sheets
+  const switchSheet = (i) => { setPreviewSheet(i); setPage(0); };
+
+  const containerStyle = fullscreen ? {
+    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999,
+    background: 'var(--panel, #fff)', display: 'flex', flexDirection: 'column', overflow: 'hidden',
+  } : { marginBottom: 12 };
+
+  const tableMaxHeight = fullscreen ? 'calc(100vh - 90px)' : 400;
+
+  return (
+    <div className={fullscreen ? '' : 'panel'} style={containerStyle}>
+      {/* Header */}
+      <div className="panel-header" style={{ flexShrink: 0, padding: fullscreen ? '8px 16px' : undefined }}>
+        <span className="panel-title" style={{ fontSize: fullscreen ? 14 : 12 }}>
+          {docPreview.label} — {docPreview.filename}
+        </span>
+        <div style={{ display: 'flex', gap: 4 }}>
+          <button className="btn-sm" onClick={() => setFullscreen(!fullscreen)} style={{ fontSize: 10 }}>
+            {fullscreen ? '축소' : '크게보기'}
+          </button>
+          <button className="btn-sm" onClick={onClose} style={{ fontSize: 10 }}>닫기</button>
+        </div>
+      </div>
+
+      {/* Sheet tabs */}
+      {sheets.length > 1 && (
+        <div style={{ display: 'flex', gap: 2, borderBottom: '1px solid var(--border)', marginBottom: 4, overflowX: 'auto', flexShrink: 0, padding: '0 8px' }}>
+          {sheets.map((sh, i) => (
+            <button key={i} onClick={() => switchSheet(i)}
               style={{
-                padding: '8px 16px',
-                border: 'none',
-                borderBottom: activeTab === dt.key ? '2px solid var(--accent)' : '2px solid transparent',
-                background: 'none',
-                fontWeight: activeTab === dt.key ? 700 : 400,
-                color: activeTab === dt.key ? 'var(--accent)' : 'var(--text-muted)',
-                cursor: 'pointer',
-                fontSize: 13,
-              }}
-            >
-              {dt.icon} {dt.label}
-              <StatusBadge tone={lists[dt.key].length > 0 ? 'success' : 'neutral'} >
-                {lists[dt.key].length}
-              </StatusBadge>
+                padding: '5px 12px', fontSize: 11, border: 'none',
+                borderBottom: previewSheet === i ? '2px solid var(--accent)' : '2px solid transparent',
+                background: 'none', fontWeight: previewSheet === i ? 700 : 400,
+                color: previewSheet === i ? 'var(--accent)' : 'var(--text-muted)',
+                cursor: 'pointer', whiteSpace: 'nowrap',
+              }}>
+              {sh.name} <span style={{ fontSize: 9, opacity: 0.7 }}>({sh.total_rows ?? sh.rows?.length ?? '?'})</span>
             </button>
           ))}
         </div>
-
-        <DocList
-          docType={activeTab}
-          files={lists[activeTab] || []}
-          jobUrl={job?.url}
-          cacheRoot={cacheRoot}
-        />
-      </div>
-    </div>
-  );
-}
-
-function DocList({ docType, files, jobUrl, cacheRoot }) {
-  const [previewContent, setPreviewContent] = useState(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const toast = useToast();
-
-  const apiPrefix = docType === 'sits' ? '/api/local' : '/api/jenkins';
-
-  const loadPreview = async (filename) => {
-    setPreviewLoading(true);
-    try {
-      const qs = docType === 'sits' ? '' : `?job_url=${encodeURIComponent(jobUrl ?? '')}&cache_root=${encodeURIComponent(cacheRoot ?? '')}`;
-      const data = await api(`${apiPrefix}/${docType}/view/${encodeURIComponent(filename)}${qs}`);
-      setPreviewContent({ filename, data });
-    } catch (e) {
-      toast('error', `미리보기 실패: ${e.message}`);
-    } finally {
-      setPreviewLoading(false);
-    }
-  };
-
-  if (!files.length) {
-    return (
-      <div className="text-muted text-sm" style={{ padding: 12 }}>
-        생성된 문서가 없습니다. 상단 버튼으로 생성하거나, 목록 새로고침을 시도하세요.
-      </div>
-    );
-  }
-
-  const EXT_ICON = { docx: '📝', xlsx: '📊', pdf: '📋', html: '🌐', json: '📄', md: '📝' };
-
-  return (
-    <div>
-      <div className="artifact-list">
-        {files.map((f, i) => {
-          const name = typeof f === 'string' ? f : (f.name ?? f.filename ?? f.path ?? String(f));
-          const ext = name.split('.').pop()?.toLowerCase();
-          return (
-            <div key={i} className="artifact-item" style={{ padding: '6px 8px' }}>
-              <span className="artifact-icon">{EXT_ICON[ext] || '📄'}</span>
-              <span className="artifact-name" style={{ flex: 1 }} title={name}>
-                {name.length > 60 ? `...${name.slice(-57)}` : name}
-              </span>
-              {typeof f === 'object' && f.version && (
-                <span className="pill pill-info" style={{ fontSize: 10 }}>v{f.version}</span>
-              )}
-              {typeof f === 'object' && f.quality_score != null && (
-                <span className={`pill ${f.quality_score >= 80 ? 'pill-success' : f.quality_score >= 60 ? 'pill-warning' : 'pill-danger'}`} style={{ fontSize: 10 }}>
-                  Q{f.quality_score}
-                </span>
-              )}
-              <button
-                className="btn-sm"
-                onClick={() => loadPreview(name)}
-                disabled={previewLoading}
-                style={{ fontSize: 10, padding: '2px 6px' }}
-              >
-                미리보기
-              </button>
-              <a
-                href={docType === 'sits'
-                  ? `/api/local/${docType}/download/${encodeURIComponent(name)}`
-                  : `/api/jenkins/${docType}/download/${encodeURIComponent(name)}?job_url=${encodeURIComponent(jobUrl ?? '')}&cache_root=${encodeURIComponent(cacheRoot ?? '')}`
-                }
-                download
-                style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', padding: '2px 4px' }}
-                title="다운로드"
-              >↓</a>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Preview panel */}
-      {previewContent && (
-        <div style={{ marginTop: 12, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-          <div className="row" style={{ padding: '6px 10px', background: 'var(--bg)', borderBottom: '1px solid var(--border)', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: 12, fontWeight: 600 }}>미리보기: {previewContent.filename}</span>
-            <button className="btn-sm" onClick={() => setPreviewContent(null)} style={{ fontSize: 10 }}>닫기</button>
-          </div>
-          <div className="log-box" style={{ maxHeight: 400, fontSize: 11, margin: 0, borderRadius: 0 }}>
-            {typeof previewContent.data === 'string'
-              ? previewContent.data
-              : JSON.stringify(previewContent.data, null, 2)
-            }
-          </div>
-        </div>
       )}
+
+      {/* Table */}
+      {sheet ? (() => {
+        const headers = sheet.headers || [];
+        const allRows = sheet.rows || [];
+        const totalRows = sheet.total_rows ?? allRows.length;
+        const rows = allRows.slice(0, pageSize);
+        const totalPages = Math.ceil(totalRows / pageSize);
+
+        const renderCell = (cell, ci) => {
+          const val = String(cell ?? '');
+          // Render image if cell starts with __IMG__
+          if (val.startsWith('__IMG__') && val.length > 7) {
+            const imgId = val.slice(7);
+            const docPath = docPreview.data?.filename;
+            // Find original path from allDocs
+            return <img src={`/api/preview-image?path=${encodeURIComponent(docPreview._path || '')}&image_id=${encodeURIComponent(imgId)}`}
+                        alt="diagram" style={{ maxWidth: fullscreen ? 400 : 200, maxHeight: fullscreen ? 300 : 150 }}
+                        onError={e => { e.target.style.display = 'none'; }} />;
+          }
+          return val.slice(0, fullscreen ? 200 : 60);
+        };
+
+        return (
+          <div style={{ overflowX: 'auto', maxHeight: tableMaxHeight, overflowY: 'auto', flex: fullscreen ? 1 : undefined }}>
+            <table className="impact-table" style={{ fontSize: fullscreen ? 11 : 10, minWidth: Math.max(headers.length * 100, 400) }}>
+              <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+                <tr style={{ background: 'var(--bg)' }}>
+                  {headers.map((h, i) => (
+                    <th key={i} style={{ whiteSpace: 'nowrap', maxWidth: fullscreen ? 300 : 150, overflow: 'hidden', textOverflow: 'ellipsis', padding: fullscreen ? '6px 10px' : '4px 6px' }}
+                        title={h}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, ri) => (
+                  <tr key={ri}>
+                    {(Array.isArray(row) ? row : []).map((cell, ci) => (
+                      <td key={ci}
+                          style={{ maxWidth: fullscreen ? 400 : 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: fullscreen ? 'pre-wrap' : 'nowrap', padding: fullscreen ? '4px 8px' : '2px 4px', fontSize: fullscreen ? 11 : 10, wordBreak: fullscreen ? 'break-word' : undefined }}
+                          title={String(cell || '')}>
+                        {renderCell(cell, ci)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {/* Pagination */}
+            {totalRows > pageSize && (
+              <div className="row" style={{ justifyContent: 'center', gap: 6, padding: '8px 0' }}>
+                <button className="btn-sm" onClick={() => setPage(0)} disabled={page === 0}>«</button>
+                <button className="btn-sm" onClick={() => setPage(p => p - 1)} disabled={page === 0}>‹</button>
+                <span className="text-sm" style={{ padding: '4px 8px' }}>
+                  {page * pageSize + 1}~{Math.min((page + 1) * pageSize, totalRows)} / {totalRows}행
+                </span>
+                <button className="btn-sm" onClick={() => setPage(p => p + 1)} disabled={page >= totalPages - 1}>›</button>
+                <button className="btn-sm" onClick={() => setPage(totalPages - 1)} disabled={page >= totalPages - 1}>»</button>
+              </div>
+            )}
+          </div>
+        );
+      })() : <div className="text-muted text-sm" style={{ padding: 12 }}>데이터 없음</div>}
     </div>
   );
 }
+

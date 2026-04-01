@@ -233,6 +233,8 @@ class JenkinsJob:
     url: str
     color: Optional[str] = None
     class_name: Optional[str] = None
+    lastBuild: Optional[Dict[str, Any]] = None
+    lastSuccessfulBuild: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -330,7 +332,7 @@ class JenkinsServerClient(_BaseJenkinsClient):
         out: List[JenkinsJob] = []
 
         def _walk(jenkins_url: str, prefix: str, depth: int) -> None:
-            api = _join_url(jenkins_url, "api/json?tree=jobs[name,url,color,_class]")
+            api = _join_url(jenkins_url, "api/json?tree=jobs[name,url,color,_class,lastBuild[number,result,timestamp],lastSuccessfulBuild[number,timestamp]]")
             data = self._open_json(api)
             for j in _as_list(data.get("jobs")):
                 j = _as_dict(j)
@@ -339,12 +341,16 @@ class JenkinsServerClient(_BaseJenkinsClient):
                 if not name or not url:
                     continue
                 full_name = f"{prefix}{name}" if not prefix else f"{prefix}/{name}"
+                lb = j.get("lastBuild")
+                lsb = j.get("lastSuccessfulBuild")
                 out.append(
                     JenkinsJob(
                         name=full_name,
                         url=url,
                         color=_norm_str(j.get("color")) or None,
                         class_name=_norm_str(j.get("_class")) or None,
+                        lastBuild=lb if isinstance(lb, dict) else None,
+                        lastSuccessfulBuild=lsb if isinstance(lsb, dict) else None,
                     )
                 )
                 if recursive and depth < max_depth and self._is_folder(_norm_str(j.get("_class"))):

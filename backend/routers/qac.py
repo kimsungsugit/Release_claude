@@ -467,3 +467,83 @@ async def qac_generate_excel(
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Excel generation error: {exc}") from exc
+
+
+@router.get("/api/qac/reports")
+def qac_list_reports() -> Dict[str, Any]:
+    """생성된 QAC Excel 리포트 목록"""
+    output_dir = repo_root / "reports" / "qac_excel"
+    if not output_dir.exists():
+        return {"ok": True, "reports": [], "count": 0}
+    files = []
+    for f in sorted(output_dir.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True):
+        files.append({
+            "name": f.name,
+            "size": f.stat().st_size,
+            "created": datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
+        })
+    return {"ok": True, "reports": files, "count": len(files)}
+
+
+@router.get("/api/qac/reports/{filename}")
+def qac_download_report(filename: str) -> FileResponse:
+    """생성된 QAC Excel 리포트 다운로드"""
+    output_dir = repo_root / "reports" / "qac_excel"
+    from backend.services.paths import safe_resolve_under
+    file_path = safe_resolve_under(output_dir, filename)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(str(file_path), filename=filename,
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@router.post("/api/qac/generate-excel-from-path")
+def qac_generate_excel_from_path(body: Dict[str, Any]) -> FileResponse:
+    """서버 로컬 경로의 QAC HTML → Excel 생성"""
+    file_path = str(body.get("path", "")).strip()
+    old_version = bool(body.get("old_version", False))
+    if not file_path:
+        raise HTTPException(status_code=400, detail="path required")
+    p = Path(file_path).expanduser().resolve()
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+    try:
+        qac_manager = parse_qac_report(p, old_version)
+        output_dir = repo_root / "reports" / "qac_excel"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"qac_{p.stem}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        output_path = output_dir / filename
+        if not generate_qac_excel(qac_manager, output_path):
+            raise HTTPException(status_code=500, detail="Excel generation failed")
+        return FileResponse(str(output_path), filename=filename,
+                            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/api/qac/scan-folder")
+def qac_scan_folder(body: Dict[str, Any]) -> Dict[str, Any]:
+    """폴더 경로를 스캔하여 QAC HTML 파일 목록 반환"""
+    folder = str(body.get("folder", "")).strip()
+    if not folder:
+        raise HTTPException(status_code=400, detail="folder path required")
+    p = Path(folder).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"폴더를 찾을 수 없습니다: {folder}")
+
+    files = []
+    for f in sorted(p.rglob("*.html")):
+        name = f.name
+        kind = "hmr" if "_HMR_" in name else "crr" if "_CRR_" in name else "rcr" if "_RCR_" in name else "other"
+        can_parse = kind == "hmr"
+        files.append({
+            "name": f.name,
+            "path": str(f),
+            "rel_path": str(f.relative_to(p)),
+            "kind": kind,
+            "can_parse": can_parse,
+            "size": f.stat().st_size,
+        })
+    return {"ok": True, "folder": str(p), "items": files, "count": len(files)}

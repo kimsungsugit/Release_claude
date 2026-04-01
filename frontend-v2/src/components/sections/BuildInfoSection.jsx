@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { post } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
@@ -85,6 +85,13 @@ export default function BuildInfoSection({ job, analysisResult }) {
       setLoading(false);
     }
   }, [job, cfg, toast]);
+
+  // Auto-load builds on mount
+  useEffect(() => {
+    if (job?.url && cfg.username && cfg.token && builds.length === 0) {
+      loadBuilds();
+    }
+  }, [job?.url]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pagedBuilds = builds.slice(buildPage * PAGE_SIZE, (buildPage + 1) * PAGE_SIZE);
   const totalPages = Math.ceil(builds.length / PAGE_SIZE);

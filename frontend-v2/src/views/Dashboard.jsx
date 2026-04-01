@@ -428,6 +428,7 @@ export default function Dashboard({ onGoDetail }) {
 function JobCard({ job, selected, onClick }) {
   const tone = colorTone(job.color);
   const lb = job.lastBuild;
+  const lsb = job.lastSuccessfulBuild;
   const label = tone === 'success' ? 'SUCCESS'
     : tone === 'danger'  ? 'FAILURE'
     : tone === 'running' ? 'RUNNING'
@@ -452,6 +453,11 @@ function JobCard({ job, selected, onClick }) {
           <span className="text-muted">빌드 이력 없음</span>
         )}
       </div>
+      {lsb && lsb.number !== lb?.number && (
+        <div className="job-card-meta" style={{ fontSize: 10, color: 'var(--color-success)' }}>
+          ✅ 최근 성공: #{lsb.number} ({lsb.timestamp ? new Date(lsb.timestamp).toLocaleDateString('ko-KR') : ''})
+        </div>
+      )}
     </div>
   );
 }
@@ -690,7 +696,10 @@ function ResultPanel({ result, onGoDetail }) {
       </div>
 
       <div className="row mt-3" style={{ justifyContent: 'flex-end' }}>
-        <button onClick={onGoDetail}>세부 데이터 보기 →</button>
+        <button onClick={() => onGoDetail()}>세부 데이터 보기 →</button>
+        {(result?.impactData?.changed_function_types && Object.keys(result.impactData.changed_function_types).length > 0) && (
+          <button onClick={() => onGoDetail('impact')} style={{ marginLeft: 6 }}>영향 가이드 →</button>
+        )}
       </div>
     </div>
   );

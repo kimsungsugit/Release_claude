@@ -540,3 +540,39 @@ def vcast_download_report(filename: str) -> FileResponse:
         raise HTTPException(status_code=500, detail=f"Download error: {str(e)}")
 
 
+@router.post("/api/vcast/scan-folder")
+def vcast_scan_folder(body: Dict[str, Any]) -> Dict[str, Any]:
+    """폴더 경로를 스캔하여 VectorCAST HTML 파일 목록 반환"""
+    folder = str(body.get("folder", "")).strip()
+    if not folder:
+        raise HTTPException(status_code=400, detail="folder path required")
+    p = Path(folder).expanduser().resolve()
+    if not p.exists() or not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"폴더를 찾을 수 없습니다: {folder}")
+
+    files = []
+    for f in sorted(p.rglob("*.html")):
+        name = f.name.lower()
+        if "testcasedatareport" in name:
+            kind = "TestCaseData"
+        elif "executionresultreport" in name:
+            kind = "ExecutionResult"
+        elif "metricsreport" in name or "metrics_report" in name:
+            kind = "Metrics"
+        elif "aggregatecoveragereport" in name or "aggregate_report" in name:
+            kind = "AggregateCoverage"
+        elif "full_report" in name:
+            kind = "Full"
+        elif "environment_report" in name:
+            kind = "Environment"
+        else:
+            continue  # skip non-VectorCAST HTML
+        files.append({
+            "name": f.name,
+            "path": str(f),
+            "rel_path": str(f.relative_to(p)),
+            "kind": kind,
+            "size": f.stat().st_size,
+        })
+    return {"ok": True, "folder": str(p), "items": files, "count": len(files)}
+

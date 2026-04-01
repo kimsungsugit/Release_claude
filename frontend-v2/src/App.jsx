@@ -280,7 +280,7 @@ export default function App() {
               <div className="tab-content">
                 <ErrorBoundary>
                   <div style={{ display: activeTab === 'dashboard' ? 'block' : 'none' }}>
-                    <Dashboard onGoDetail={() => setActiveTab('detail')} />
+                    <Dashboard onGoDetail={(section) => { setActiveTab('detail'); if (section) setTimeout(() => window.__detailSection?.(section), 100); }} />
                   </div>
                   <div style={{ display: activeTab === 'detail' ? 'block' : 'none' }}>
                     <Detail />

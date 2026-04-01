@@ -1592,10 +1592,14 @@ def jenkins_uds_logic(job_url: str, cache_root: str, filename: str) -> FileRespo
 
 @router.get("/api/jenkins/uds/list")
 def jenkins_uds_list(job_url: str, cache_root: str) -> Dict[str, Any]:
+    try:
+        from report.constants import UDS_PLACEHOLDERS as _UDS_PH
+    except ImportError:
+        _UDS_PH = []
     job_slug = _job_slug(job_url)
     out_dir = _jenkins_exports_dir(cache_root)
     if not out_dir.exists():
-        return {"ok": True, "items": [], "placeholders": UDS_PLACEHOLDERS}
+        return {"ok": True, "items": [], "placeholders": _UDS_PH}
     meta = _load_uds_meta(out_dir, job_slug)
     labels = meta.get("labels") if isinstance(meta.get("labels"), dict) else {}
     items: List[Dict[str, Any]] = []
@@ -1619,7 +1623,7 @@ def jenkins_uds_list(job_url: str, cache_root: str) -> Dict[str, Any]:
             )
         except Exception:
             continue
-    return {"ok": True, "items": items, "placeholders": UDS_PLACEHOLDERS}
+    return {"ok": True, "items": items, "placeholders": _UDS_PH}
 
 
 @router.get("/api/jenkins/uds/view")
@@ -2244,6 +2248,154 @@ def jenkins_uds_traceability_matrix(req: UdsTraceabilityMatrixRequest) -> Dict[s
         return {"ok": True, "matrix": matrix}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/api/jenkins/uds/extract-mapping")
+def jenkins_uds_extract_mapping(body: Dict[str, Any]) -> Dict[str, Any]:
+    """UDS 문서에서 함수↔요구사항 매핑을 추출"""
+    import re as _re
+    uds_path = str(body.get("uds_path", "")).strip()
+    if not uds_path:
+        raise HTTPException(status_code=400, detail="uds_path required")
+    p = Path(uds_path).expanduser().resolve()
+    if not p.exists():
+        raise HTTPException(status_code=400, detail=f"UDS 파일을 찾을 수 없습니다: {uds_path}")
+
+    try:
+        import docx as _docx
+        doc = _docx.Document(str(p))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"UDS 파싱 실패: {exc}")
+
+    # Extract func_id → func_name → requirement_ids from Function Information tables
+    req_to_sources: Dict[str, set] = {}
+    for table in doc.tables:
+        rows = table.rows
+        if len(rows) < 4:
+            continue
+        first_cell = rows[0].cells[0].text.strip()
+        if "Function Information" not in first_cell:
+            continue
+
+        func_id = ""
+        func_name = ""
+        req_refs = []
+        for row in rows:
+            cells = [c.text.strip() for c in row.cells]
+            label = cells[0] if cells else ""
+            value = cells[2] if len(cells) > 2 else ""
+            if label == "ID":
+                func_id = value
+            elif label == "Name":
+                func_name = value
+            # Find requirement IDs in all cells
+            for c in cells:
+                req_refs.extend(_re.findall(r"Sw[A-Z]{2,}_\d+", c))
+
+        if func_name:
+            req_refs = sorted(set(req_refs) - {func_id})
+            for rid in req_refs:
+                if rid not in req_to_sources:
+                    req_to_sources[rid] = set()
+                req_to_sources[rid].add(func_name)
+
+    # Convert to mapping_pairs format expected by traceability-matrix API
+    mapping_pairs = []
+    for rid, sources in sorted(req_to_sources.items()):
+        mapping_pairs.append({
+            "requirement_id": rid,
+            "source_ids": sorted(sources),
+        })
+
+    return {
+        "ok": True,
+        "mapping_pairs": mapping_pairs,
+        "total_requirements": len(mapping_pairs),
+        "total_functions": len({fn for fns in req_to_sources.values() for fn in fns}),
+    }
+
+
+@router.post("/api/jenkins/sts/extract-traceability")
+def jenkins_sts_extract_traceability(body: Dict[str, Any]) -> Dict[str, Any]:
+    """STS/SUTS Excel에서 Traceability 시트의 요구사항↔TC 매핑 추출"""
+    file_path = str(body.get("path", "")).strip()
+    if not file_path:
+        raise HTTPException(status_code=400, detail="path required")
+    p = Path(file_path).expanduser().resolve()
+    if not p.exists():
+        raise HTTPException(status_code=400, detail=f"파일을 찾을 수 없습니다: {file_path}")
+
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(str(p), data_only=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Excel 읽기 실패: {exc}")
+
+    # Find traceability sheet
+    trace_ws = None
+    trace_type = None
+    for name in wb.sheetnames:
+        if "Traceability" in name or "traceability" in name:
+            trace_ws = wb[name]
+            trace_type = "matrix" if "SwRS" in name else "list"
+            break
+
+    if not trace_ws:
+        wb.close()
+        return {"ok": False, "error": "Traceability 시트를 찾을 수 없습니다.", "vcast_rows": []}
+
+    vcast_rows = []
+
+    if trace_type == "matrix":
+        # STS format: row 4 has req IDs as column headers, rows 5+ have TC IDs with markers
+        req_cols = []
+        for c in range(3, trace_ws.max_column + 1):
+            v = trace_ws.cell(4, c).value
+            if v and "Sw" in str(v):
+                req_cols.append((c, str(v).strip()))
+
+        for r in range(5, trace_ws.max_row + 1):
+            tc_id = str(trace_ws.cell(r, 3).value or "").strip()
+            if not tc_id:
+                continue
+            for col, rid in req_cols:
+                val = trace_ws.cell(r, col).value
+                if val is not None and str(val).strip():
+                    vcast_rows.append({
+                        "requirement_id": rid,
+                        "testcase": tc_id,
+                        "source": "STS",
+                        "result": "mapped",
+                    })
+    else:
+        # SUTS format: columns — TC ID (5), SRS Req ID (6)
+        for r in range(4, trace_ws.max_row + 1):
+            tc_id = str(trace_ws.cell(r, 5).value or "").strip()
+            req_raw = str(trace_ws.cell(r, 6).value or "").strip()
+            func_name = str(trace_ws.cell(r, 4).value or "").strip()
+            if not tc_id:
+                continue
+            import re as _re
+            req_ids = _re.findall(r"Sw[A-Z]{2,}_\d+|Sy[A-Z]{2,}_\d+", req_raw)
+            for rid in req_ids:
+                vcast_rows.append({
+                    "requirement_id": rid,
+                    "testcase": tc_id,
+                    "unit": func_name,
+                    "source": "SUTS",
+                    "result": "mapped",
+                })
+
+    wb.close()
+
+    # Summarize
+    req_set = set(r["requirement_id"] for r in vcast_rows)
+    return {
+        "ok": True,
+        "vcast_rows": vcast_rows,
+        "total_mappings": len(vcast_rows),
+        "requirements_covered": len(req_set),
+    }
 
 
 @router.post("/api/jenkins/uds/publish")
