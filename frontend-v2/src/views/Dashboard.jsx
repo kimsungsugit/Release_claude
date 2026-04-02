@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from 'react';
-import { post, api, colorTone, buildTone, defaultCacheRoot, fmtBytes } from '../api.js';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { post, api, defaultCacheRoot } from '../api.js';
 import { useToast, useJenkinsCfg, useJob } from '../App.jsx';
-import StatusBadge from '../components/StatusBadge.jsx';
+import JobCard from '../components/JobCard.jsx';
+import ResultPanel from '../components/ResultPanel.jsx';
 
 /* ── Step definitions ─────────────────────────────────────────────── */
 const STEPS = [
@@ -72,6 +73,7 @@ export default function Dashboard({ onGoDetail }) {
   const [stepMsgs, setStepMsgs] = useState({});
   const [result, setResult] = useState(null);
   const abortRef = useRef(null);
+  const autoRunRef = useRef(null);
 
   /* Load Jenkins job list */
   const loadJobs = useCallback(async () => {
@@ -97,13 +99,20 @@ export default function Dashboard({ onGoDetail }) {
     }
   }, [cfg, toast]);
 
+  // Auto-load jobs on mount if credentials exist
+  useEffect(() => {
+    if (cfg.baseUrl && cfg.username && cfg.token && jobs.length === 0) {
+      loadJobs();
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const setStep = (id, state, msg = '') => {
     setStepStates(p => ({ ...p, [id]: state }));
     if (msg) setStepMsgs(p => ({ ...p, [id]: msg }));
   };
 
   /* Analysis result cache keyed by jobUrl + buildNumber */
-  const cacheRef = useRef({}); // { [jobUrl]: { buildNumber, result, timestamp } }
+  const cacheRef = useRef({});
 
   /* One-button automation */
   const runAnalysis = useCallback(async () => {
@@ -130,7 +139,6 @@ export default function Dashboard({ onGoDetail }) {
     let scmList = [];
     let impactData = null;
 
-    // Helper: update result progressively so UI shows data as it arrives
     const updateResult = () => {
       const current = { artifacts, reportData, scmList, impactData, jobUrl, cacheRoot };
       setResult(current);
@@ -138,7 +146,7 @@ export default function Dashboard({ onGoDetail }) {
     };
 
     try {
-      /* ── Step 1: Artifact sync (job_id polling) ── */
+      /* Step 1: Artifact sync */
       setStep('sync', 'active', '동기화 시작 중...');
       const syncRes = await post('/api/jenkins/sync-async', {
         job_url: jobUrl,
@@ -158,10 +166,9 @@ export default function Dashboard({ onGoDetail }) {
       });
 
       if (syncProgress.error) throw new Error(`동기화 실패: ${syncProgress.error}`);
-
       setStep('sync', 'done', '동기화 완료');
 
-      /* ── Cache check: quick build-info to compare build number ── */
+      /* Cache check */
       try {
         const buildInfo = await post('/api/jenkins/build-info', {
           job_url: jobUrl,
@@ -172,7 +179,6 @@ export default function Dashboard({ onGoDetail }) {
         const currentBuild = buildInfo?.number ?? buildInfo?.build_number;
         const cached = cacheRef.current[jobUrl];
         if (cached && cached.buildNumber === currentBuild && cached.result) {
-          // Build unchanged — use cached result
           setStep('report', 'done', `빌드 #${currentBuild} (캐시)`);
           setStep('scm', 'done', '캐시 사용');
           setStep('impact', 'done', '캐시 사용');
@@ -186,7 +192,7 @@ export default function Dashboard({ onGoDetail }) {
         console.debug('Build info cache check skipped:', e.message);
       }
 
-      /* ── Step 2: Report data + artifact list ── */
+      /* Step 2: Report data + artifact list */
       setStep('report', 'active', '빌드 정보 수집 중...');
       try {
         const raw = await post('/api/jenkins/report/summary', {
@@ -219,9 +225,9 @@ export default function Dashboard({ onGoDetail }) {
       } catch (e) {
         setStep('report', 'error', e.message);
       }
-      updateResult(); // show build info immediately
+      updateResult();
 
-      /* ── Step 3: SCM list ── */
+      /* Step 3: SCM list */
       setStep('scm', 'active', 'SCM 조회 중...');
       try {
         const scmData = await api('/api/scm/list');
@@ -230,9 +236,9 @@ export default function Dashboard({ onGoDetail }) {
       } catch (e) {
         setStep('scm', 'error', e.message);
       }
-      updateResult(); // show SCM info
+      updateResult();
 
-      /* ── Step 4: Impact analysis (job_id polling) ── */
+      /* Step 4: Impact analysis */
       if (scmList.length > 0) {
         setStep('impact', 'active', '영향도 분석 시작 중...');
         const scm = scmList[0];
@@ -263,9 +269,8 @@ export default function Dashboard({ onGoDetail }) {
         setStep('impact', 'done', 'SCM 미등록 — 건너뜀');
       }
 
-      updateResult(); // final update with impact
+      updateResult();
 
-      // Cache result keyed by jobUrl + buildNumber
       const bn = reportData?.build_number;
       if (bn) {
         cacheRef.current[jobUrl] = {
@@ -284,6 +289,8 @@ export default function Dashboard({ onGoDetail }) {
     }
   }, [selectedJob, cfg, toast, setAnalysisResult]);
 
+  autoRunRef.current = runAnalysis;
+
   const stopAnalysis = () => {
     abortRef.current?.abort();
     setRunning(false);
@@ -294,7 +301,7 @@ export default function Dashboard({ onGoDetail }) {
     !filter || jobName(j).toLowerCase().includes(filter.toLowerCase())
   );
 
-  /* ── Stats ── */
+  /* Stats */
   const successCount = jobs.filter(j => (j.color || '').includes('blue')).length;
   const failCount    = jobs.filter(j => (j.color || '').includes('red')).length;
 
@@ -334,7 +341,7 @@ export default function Dashboard({ onGoDetail }) {
         />
         <div className="toolbar-spacer" />
         <button onClick={loadJobs} disabled={jobsLoading}>
-          {jobsLoading ? <><span className="spinner" style={{ display: 'inline-block', marginRight: 6 }} /> 조회 중...</> : '📋 Job 목록 불러오기'}
+          {jobsLoading ? <><span className="spinner" style={{ display: 'inline-block', marginRight: 6 }} /> 조회 중...</> : 'Job 목록 불러오기'}
         </button>
       </div>
 
@@ -351,6 +358,7 @@ export default function Dashboard({ onGoDetail }) {
                 setResult(null);
                 setStepStates({});
                 setStepMsgs({});
+                setTimeout(() => autoRunRef.current?.(), 100);
               }}
             />
           ))}
@@ -358,7 +366,7 @@ export default function Dashboard({ onGoDetail }) {
       ) : (
         !jobsLoading && (
           <div className="empty-state">
-            <div className="empty-icon">{jobs.length === 0 ? '🔧' : '🔍'}</div>
+            <div className="empty-icon">{jobs.length === 0 ? '?' : '?'}</div>
             <div className="empty-title">
               {jobs.length === 0 ? 'Jenkins Job 없음' : '검색 결과 없음'}
             </div>
@@ -382,7 +390,7 @@ export default function Dashboard({ onGoDetail }) {
               </button>
             ) : (
               <button className="btn-primary" onClick={runAnalysis}>
-                ▶ 동기화 &amp; 분석 실행
+                동기화 & 분석 실행
               </button>
             )}
           </div>
@@ -418,550 +426,6 @@ export default function Dashboard({ onGoDetail }) {
 
           {/* Results */}
           {result && <ResultPanel result={result} onGoDetail={onGoDetail} />}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ── Job card ─────────────────────────────────────────────────────── */
-function JobCard({ job, selected, onClick }) {
-  const tone = colorTone(job.color);
-  const lb = job.lastBuild;
-  const lsb = job.lastSuccessfulBuild;
-  const label = tone === 'success' ? 'SUCCESS'
-    : tone === 'danger'  ? 'FAILURE'
-    : tone === 'running' ? 'RUNNING'
-    : tone === 'warning' ? 'UNSTABLE' : 'NONE';
-
-  return (
-    <div className={`job-card${selected ? ' selected' : ''}`} onClick={onClick}>
-      <div className="job-card-header">
-        <span className="job-card-name">{job.name || job.fullName}</span>
-        <StatusBadge tone={tone}>{label}</StatusBadge>
-      </div>
-      <div className="job-card-meta">
-        {lb ? (
-          <>
-            <span>🔢 빌드 #{lb.number}</span>
-            {lb.result && <span>📊 {lb.result}</span>}
-            {lb.timestamp && (
-              <span>🕐 {new Date(lb.timestamp).toLocaleDateString('ko-KR')}</span>
-            )}
-          </>
-        ) : (
-          <span className="text-muted">빌드 이력 없음</span>
-        )}
-      </div>
-      {lsb && lsb.number !== lb?.number && (
-        <div className="job-card-meta" style={{ fontSize: 10, color: 'var(--color-success)' }}>
-          ✅ 최근 성공: #{lsb.number} ({lsb.timestamp ? new Date(lsb.timestamp).toLocaleDateString('ko-KR') : ''})
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ── Result panel ─────────────────────────────────────────────────── */
-function ResultPanel({ result, onGoDetail }) {
-  const { artifacts, reportData, impactData, scmList } = result;
-  const kpis = reportData?.kpis || {};
-  const build = kpis.build || {};
-  const cov = kpis.coverage || {};
-  const tests = kpis.tests || {};
-  const scan = kpis.scan || {};
-  const fileTypes = kpis.files || {};
-  const prqa = kpis.prqa || {};
-  const linkedDocs = impactData?._linked_docs || scmList?.[0]?.linked_docs || {};
-  const linkedCount = Object.values(linkedDocs).filter(Boolean).length;
-
-  return (
-    <div>
-      <div className="divider" />
-
-      {/* ── KPI Cards ── */}
-      <div className="stats-row" style={{ marginBottom: 16 }}>
-        {/* Build */}
-        <div className="stat-card">
-          <div className="stat-value">
-            <StatusBadge tone={buildTone(build.result || reportData?.result)}>
-              #{build.build_number || reportData?.build_number || '?'} {build.result || reportData?.result || '-'}
-            </StatusBadge>
-          </div>
-          <div className="stat-label">빌드 결과</div>
-        </div>
-        {/* Coverage */}
-        {cov.line_rate != null && (
-          <div className="stat-card">
-            <div className="stat-value" style={{ color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
-              {Math.round(cov.line_rate * 100)}%
-            </div>
-            <div className="stat-label">Line Coverage</div>
-          </div>
-        )}
-        {cov.branch_rate != null && (
-          <div className="stat-card">
-            <div className="stat-value" style={{ color: cov.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
-              {Math.round(cov.branch_rate * 100)}%
-            </div>
-            <div className="stat-label">Branch Coverage</div>
-          </div>
-        )}
-        {/* Tests */}
-        <div className="stat-card">
-          <div className="stat-value" style={{ color: tests.ok ? 'var(--color-success)' : 'var(--color-danger)' }}>
-            {tests.ok ? 'PASS' : (tests.ok === false ? 'FAIL' : '-')}
-          </div>
-          <div className="stat-label">테스트</div>
-        </div>
-        {/* File count */}
-        <div className="stat-card">
-          <div className="stat-value">{scan.files_total ?? artifacts.length ?? 0}</div>
-          <div className="stat-label">아티팩트</div>
-        </div>
-        {/* Linked docs */}
-        <div className="stat-card">
-          <div className="stat-value">{linkedCount}</div>
-          <div className="stat-label">연결 문서</div>
-        </div>
-      </div>
-
-      <div className="result-grid">
-        {/* ── Left: Build & Artifact Summary ── */}
-        <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)' }}>
-          <div className="panel-header">
-            <span className="panel-title">빌드 & 아티팩트 요약</span>
-          </div>
-
-          {/* Build timestamp */}
-          {build.timestamp && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, padding: '6px 10px', background: 'var(--card-bg, var(--surface))', borderRadius: 6, border: '1px solid var(--border)' }}>
-              <span style={{ fontSize: 16 }}>📅</span>
-              <div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>빌드 일시</div>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{new Date(build.timestamp).toLocaleString('ko-KR')}</div>
-              </div>
-            </div>
-          )}
-
-          {/* File type bar chart */}
-          {(() => {
-            const entries = Object.entries(fileTypes);
-            if (!entries.length) return null;
-            const total = entries.reduce((s, [, c]) => s + c, 0);
-            const BAR_COLORS = { html: '#3b82f6', xlsx: '#22c55e', json: '#f59e0b', csv: '#8b5cf6', md: '#64748b', pdf: '#ef4444' };
-            return (
-              <div style={{ marginBottom: 12 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>파일 유형 분포</span>
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>총 {total}개</span>
-                </div>
-                {/* Stacked bar */}
-                <div style={{ display: 'flex', height: 20, borderRadius: 6, overflow: 'hidden', border: '1px solid var(--border)' }}>
-                  {entries.map(([ext, cnt]) => (
-                    <div
-                      key={ext}
-                      title={`${ext.toUpperCase()}: ${cnt}`}
-                      style={{
-                        width: `${(cnt / total) * 100}%`,
-                        background: BAR_COLORS[ext] || '#94a3b8',
-                        minWidth: 12,
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: 9, fontWeight: 700, color: '#fff',
-                        cursor: 'default',
-                      }}
-                    >
-                      {cnt >= 2 ? cnt : ''}
-                    </div>
-                  ))}
-                </div>
-                {/* Legend */}
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px 10px', marginTop: 6 }}>
-                  {entries.map(([ext, cnt]) => (
-                    <div key={ext} style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11 }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 2, background: BAR_COLORS[ext] || '#94a3b8', flexShrink: 0 }} />
-                      <span style={{ color: 'var(--text-muted)' }}>{ext.toUpperCase()}</span>
-                      <span style={{ fontWeight: 600 }}>{cnt}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* PRQA 정적분석 */}
-          {prqa.rule_violation_count != null && (() => {
-            const complianceRate = prqa.project_compliance_index;
-            const hmr = prqa.hmr_stats || {};
-            return (
-              <div style={{ marginBottom: 10, padding: '10px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <span style={{ fontSize: 12, fontWeight: 600 }}>PRQA 정적분석</span>
-                  {complianceRate != null && (
-                    <span className={`pill ${complianceRate >= 90 ? 'pill-success' : complianceRate >= 70 ? 'pill-warning' : 'pill-danger'}`} style={{ fontSize: 11 }}>
-                      준수율 {complianceRate}%
-                    </span>
-                  )}
-                </div>
-                {/* Compliance bar */}
-                {complianceRate != null && (
-                  <div style={{ height: 6, borderRadius: 3, background: 'var(--border)', marginBottom: 8, overflow: 'hidden' }}>
-                    <div style={{ height: '100%', width: `${complianceRate}%`, borderRadius: 3, background: complianceRate >= 90 ? 'var(--color-success)' : complianceRate >= 70 ? 'var(--color-warning)' : 'var(--color-danger)', transition: 'width 0.5s' }} />
-                  </div>
-                )}
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 16, fontWeight: 700, color: prqa.rule_violation_count > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{prqa.rule_violation_count}</div>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>위반 건수</div>
-                  </div>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 16, fontWeight: 700 }}>{prqa.violated_rules ?? '-'}<span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text-muted)' }}>/{(prqa.violated_rules ?? 0) + (prqa.compliant_rules ?? 0)}</span></div>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>위반 규칙</div>
-                  </div>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ fontSize: 16, fontWeight: 700 }}>{prqa.file_compliance_index ?? '-'}%</div>
-                    <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>파일 준수율</div>
-                  </div>
-                </div>
-                {/* HMR complexity stats */}
-                {hmr.functions_total && (
-                  <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border)', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 4 }}>
-                    <div style={{ textAlign: 'center' }}>
-                      <div style={{ fontSize: 13, fontWeight: 700 }}>{hmr.functions_total}</div>
-                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>함수</div>
-                    </div>
-                    <div style={{ textAlign: 'center' }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: hmr.vg_max > 15 ? 'var(--color-danger)' : hmr.vg_max > 10 ? 'var(--color-warning)' : 'var(--color-success)' }}>{hmr.vg_max}</div>
-                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG Max</div>
-                    </div>
-                    <div style={{ textAlign: 'center' }}>
-                      <div style={{ fontSize: 13, fontWeight: 700 }}>{hmr.vg_p95}</div>
-                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG P95</div>
-                    </div>
-                    <div style={{ textAlign: 'center' }}>
-                      <div style={{ fontSize: 13, fontWeight: 700 }}>{hmr.vg_mean?.toFixed(1)}</div>
-                      <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG 평균</div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* Scan + Code Metrics + VectorCAST row */}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {/* Scan */}
-            <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>스캔 결과</div>
-              {(scan.fail > 0 || scan.error > 0 || scan.warn > 0) ? (
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                  {scan.fail > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>FAIL {scan.fail}</span>}
-                  {scan.error > 0 && <span className="pill pill-danger" style={{ fontSize: 10 }}>ERROR {scan.error}</span>}
-                  {scan.warn > 0 && <span className="pill pill-warning" style={{ fontSize: 10 }}>WARN {scan.warn}</span>}
-                </div>
-              ) : (
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-success)' }}>✓ 이상 없음</div>
-              )}
-            </div>
-
-            {/* Code Metrics */}
-            {kpis.code_metrics?.code_files && (
-              <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>코드 메트릭</div>
-                <div style={{ fontSize: 11 }}>
-                  <span style={{ fontWeight: 600 }}>{kpis.code_metrics.code_files}</span> 파일 · <span style={{ fontWeight: 600 }}>{kpis.code_metrics.functions}</span> 함수 · <span style={{ fontWeight: 600 }}>{kpis.code_metrics.nloc?.toLocaleString()}</span> LOC
-                </div>
-              </div>
-            )}
-
-            {/* VectorCAST */}
-            {reportData?.tester?.vectorcast?.test_rows_count != null && (
-              <div style={{ flex: 1, minWidth: 100, padding: '8px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--card-bg, var(--surface))' }}>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>VectorCAST</div>
-                <div style={{ fontSize: 11 }}>
-                  <span style={{ fontWeight: 600 }}>{reportData.tester.vectorcast.test_rows_count?.toLocaleString()}</span> TC · UT {(reportData.tester.vectorcast.ut_reports || []).length} / IT {(reportData.tester.vectorcast.it_reports || []).length}
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* ── Right: Document & Impact Summary ── */}
-        <div className="panel" style={{ boxShadow: 'none', background: 'var(--bg)' }}>
-          <div className="panel-header">
-            <span className="panel-title">문서 & 영향도 요약</span>
-          </div>
-          <ImpactPanel impactData={impactData} />
-        </div>
-      </div>
-
-      <div className="row mt-3" style={{ justifyContent: 'flex-end' }}>
-        <button onClick={() => onGoDetail()}>세부 데이터 보기 →</button>
-        {(result?.impactData?.changed_function_types && Object.keys(result.impactData.changed_function_types).length > 0) && (
-          <button onClick={() => onGoDetail('impact')} style={{ marginLeft: 6 }}>영향 가이드 →</button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ArtifactList({ artifacts, reportData }) {
-  // artifacts from summary: [{type, name, path, title}, ...]
-  // fallback to reportData.artifacts (object keyed by type) if needed
-  let files = artifacts;
-  if (!files.length && reportData?.artifacts && typeof reportData.artifacts === 'object' && !Array.isArray(reportData.artifacts)) {
-    files = Object.entries(reportData.artifacts).flatMap(([type, list]) =>
-      (Array.isArray(list) ? list : []).map(f => ({
-        type,
-        name: (f.path ?? f.title ?? '').split(/[\\/]/).pop(),
-        path: f.path,
-        title: f.title,
-      }))
-    );
-  }
-
-  if (!files.length) return null;
-
-  const TYPE_ICON = { html: '🌐', xlsx: '📊', json: '📄', csv: '📈', md: '📝', pdf: '📋' };
-  const icon = (f) => {
-    if (f.type && TYPE_ICON[f.type]) return TYPE_ICON[f.type];
-    const ext = String(f.name || '').split('.').pop().toLowerCase();
-    return TYPE_ICON[ext] || '📄';
-  };
-
-  return (
-    <div className="artifact-list">
-      {files.slice(0, 30).map((f, i) => {
-        const name = typeof f === 'string' ? f : (f.name || f.title || f.filename || '');
-        const dlPath = typeof f === 'object' ? f.path : null;
-        return (
-          <div key={i} className="artifact-item">
-            <span className="artifact-icon">{icon(f)}</span>
-            <span className="artifact-name" title={typeof f === 'object' ? (f.title || name) : name}>
-              {name.length > 55 ? `...${name.slice(-52)}` : name}
-            </span>
-            {f.type && <span className="pill pill-neutral" style={{ fontSize: 10 }}>{f.type.toUpperCase()}</span>}
-          </div>
-        );
-      })}
-      {files.length > 20 && (
-        <div className="text-muted text-sm mt-2">외 {files.length - 20}개 파일</div>
-      )}
-    </div>
-  );
-}
-
-const _CHANGE_TYPE_KO = {
-  SIGNATURE: '시그니처', BODY: '본문', NEW: '신규', DELETE: '삭제',
-  VARIABLE: '변수', HEADER: '헤더',
-};
-
-const _DOC_STATUS = {
-  completed:        { color: 'var(--color-success)', label: '완료' },
-  auto:             { color: 'var(--color-success)', label: '자동 반영' },
-  flagged:          { color: 'var(--color-warning)', label: '수동 검토 필요' },
-  flag:             { color: 'var(--color-warning)', label: '수동 검토 필요' },
-  review_required:  { color: 'var(--color-warning)', label: '수동 검토 필요' },
-  FLAG:             { color: 'var(--color-warning)', label: '수동 검토 필요' },
-  skipped:          { color: 'var(--text-muted)',    label: '건너뜀' },
-  error:            { color: 'var(--color-danger)',   label: '오류' },
-};
-
-function ImpactPanel({ impactData }) {
-  const [openDoc, setOpenDoc] = useState(null);
-
-  if (!impactData) {
-    return (
-      <div className="text-muted text-sm">
-        SCM이 등록되어 있지 않거나 영향도 분석 결과가 없습니다.<br />
-        설정 탭에서 SCM을 등록하면 문서 영향도를 확인할 수 있습니다.
-      </div>
-    );
-  }
-
-  // impact result may come from trigger.changed_files or top-level
-  const trigger = impactData.trigger || {};
-  const changedFiles = Array.isArray(impactData.changed_files) ? impactData.changed_files
-    : Array.isArray(trigger.changed_files) ? trigger.changed_files : [];
-  const changedFunctions = impactData.changed_functions ?? impactData.changed_function_types ?? {};
-  const changedFnEntries = typeof changedFunctions === 'object' && !Array.isArray(changedFunctions)
-    ? Object.entries(changedFunctions) : [];
-  const impact = impactData.impact || {};
-  const counts = impactData.impact_counts || {
-    direct: Array.isArray(impact.direct) ? impact.direct.length : (impact.direct ?? undefined),
-    indirect_1hop: Array.isArray(impact.indirect_1hop) ? impact.indirect_1hop.length : (impact.indirect_1hop ?? undefined),
-    indirect_2hop: Array.isArray(impact.indirect_2hop) ? impact.indirect_2hop.length : (impact.indirect_2hop ?? undefined),
-  };
-  // documents from 'documents' or 'actions' key
-  const rawDocs = impactData.documents ?? impactData.actions ?? {};
-  const docs = typeof rawDocs === 'object' ? rawDocs : {};
-  const warnings = Array.isArray(impactData.warnings) ? impactData.warnings : [];
-  const linkedDocs = impactData._linked_docs || {};
-  const scmName = impactData._scm_name || '';
-  const DOC_ORDER = ['uds', 'suts', 'sits', 'sts', 'sds'];
-  const DOC_LABEL = { uds: 'UDS', suts: 'SUTS', sits: 'SITS', sts: 'STS', sds: 'SDS', srs: 'SRS', hsis: 'HSIS' };
-
-  return (
-    <div>
-      {/* Summary badges */}
-      {/* SCM info */}
-      {scmName && <div className="text-sm" style={{ marginBottom: 6, fontWeight: 600 }}>SCM: {scmName}</div>}
-
-      <div className="row" style={{ gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-        <span className="pill pill-info">파일 {changedFiles.length}</span>
-        <span className="pill pill-info">함수 {changedFnEntries.length}</span>
-        {counts.direct != null && (
-          <span className="pill pill-warning">
-            직접 {counts.direct} / 1hop {counts.indirect_1hop || 0} / 2hop {counts.indirect_2hop || 0}
-          </span>
-        )}
-      </div>
-
-      {/* Changed files */}
-      {changedFiles.length > 0 && (
-        <details style={{ marginBottom: 10 }}>
-          <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600, marginBottom: 4 }}>
-            변경 파일 ({changedFiles.length})
-          </summary>
-          <div style={{ maxHeight: 120, overflow: 'auto' }}>
-            {changedFiles.slice(0, 20).map((f, i) => (
-              <div key={i} style={{ fontSize: 11, fontFamily: 'monospace', padding: '1px 0' }}>{f}</div>
-            ))}
-            {changedFiles.length > 20 && <div className="text-muted text-sm">외 {changedFiles.length - 20}개</div>}
-          </div>
-        </details>
-      )}
-
-      {/* Changed functions */}
-      {changedFnEntries.length > 0 && (
-        <details style={{ marginBottom: 10 }}>
-          <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600, marginBottom: 4 }}>
-            변경된 함수 ({changedFnEntries.length})
-          </summary>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, maxHeight: 120, overflow: 'auto' }}>
-            {changedFnEntries.slice(0, 50).map(([name, type]) => (
-              <span key={name} style={{ fontSize: 11, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4, padding: '1px 6px', fontFamily: 'monospace' }}>
-                {name}
-                <span className="text-muted" style={{ marginLeft: 4, fontSize: 10 }}>
-                  {_CHANGE_TYPE_KO[String(type).toUpperCase()] || type}
-                </span>
-              </span>
-            ))}
-          </div>
-        </details>
-      )}
-
-      {/* Document-level impact */}
-      {DOC_ORDER.some(k => docs[k]) ? (
-        <div style={{ border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-          <div style={{ padding: '6px 8px', background: 'var(--bg)', fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
-            문서별 영향
-          </div>
-          {DOC_ORDER.map(k => docs[k] ? (
-            <ImpactDocRow
-              key={k}
-              docKey={k}
-              doc={docs[k]}
-              open={openDoc === k}
-              onToggle={() => setOpenDoc(prev => prev === k ? null : k)}
-            />
-          ) : null)}
-        </div>
-      ) : changedFiles.length === 0 && changedFnEntries.length === 0 && Object.keys(linkedDocs).length === 0 ? (
-        <div className="text-muted text-sm">영향받는 항목 없음</div>
-      ) : null}
-
-      {/* Linked documents from SCM */}
-      {Object.keys(linkedDocs).length > 0 && (
-        <div style={{ marginTop: 10, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
-          <div style={{ padding: '6px 8px', background: 'var(--bg)', fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}>
-            연결된 문서 ({Object.keys(linkedDocs).length})
-          </div>
-          {Object.entries(linkedDocs).map(([key, path]) => {
-            if (!path) return null;
-            const filename = String(path).split(/[\\/]/).pop();
-            return (
-              <div key={key} className="row" style={{ padding: '5px 8px', gap: 8, borderBottom: '1px solid var(--border)', alignItems: 'center' }}>
-                <span style={{ fontWeight: 700, width: 44, textTransform: 'uppercase', fontSize: 12, color: 'var(--accent)' }}>
-                  {DOC_LABEL[key] || key.toUpperCase()}
-                </span>
-                <span style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={path}>
-                  {filename}
-                </span>
-                <span className="pill pill-neutral" style={{ fontSize: 9 }}>
-                  {filename.split('.').pop()?.toUpperCase()}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {/* Warnings */}
-      {warnings.length > 0 && (
-        <details style={{ marginTop: 8 }}>
-          <summary className="text-sm" style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--color-warning)' }}>
-            경고 ({warnings.length})
-          </summary>
-          <div style={{ fontSize: 11, whiteSpace: 'pre-wrap', maxHeight: 100, overflow: 'auto', marginTop: 4 }}>
-            {warnings.join('\n')}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function ImpactDocRow({ docKey, doc, open, onToggle }) {
-  const st = _DOC_STATUS[doc?.status] || { color: 'var(--text-muted)', label: doc?.status || '-' };
-  const summary = doc?.summary || {};
-  const fns = Array.isArray(doc?.flagged_functions) ? doc.flagged_functions
-    : Array.isArray(doc?.functions) ? doc.functions
-    : Array.isArray(doc?.changed_functions) ? doc.changed_functions.map(f => f?.function || f?.name || String(f))
-    : Array.isArray(doc?.changed_cases) ? doc.changed_cases.map(f => f?.function || String(f))
-    : [];
-  const hasDetail = fns.length > 0;
-
-  const metaItems = [];
-  if (docKey === 'uds' && summary.changed_functions) metaItems.push(`${summary.changed_functions}개 함수 재생성`);
-  if (docKey === 'suts') {
-    if (summary.changed_cases != null) metaItems.push(`TC ${summary.before_cases ?? '?'}→${summary.changed_cases}`);
-    if (summary.changed_sequences != null) metaItems.push(`Seq ${summary.before_sequences ?? '?'}→${summary.changed_sequences}`);
-  }
-  if (docKey === 'sits') {
-    if (summary.test_case_count != null) metaItems.push(`TC ${summary.before_test_case_count ?? '?'}→${summary.test_case_count}`);
-    if (summary.delta_cases != null) metaItems.push(`Δ${summary.delta_cases >= 0 ? '+' : ''}${summary.delta_cases} TC`);
-  }
-  if ((docKey === 'sts' || docKey === 'sds') && summary.flagged_functions) {
-    metaItems.push(`${summary.flagged_functions}개 함수 수동 검토 필요`);
-  }
-
-  return (
-    <div style={{ borderBottom: '1px solid var(--border)' }}>
-      <div
-        className="row"
-        style={{ padding: '7px 8px', gap: 8, alignItems: 'center', cursor: hasDetail ? 'pointer' : 'default' }}
-        onClick={hasDetail ? onToggle : undefined}
-      >
-        <span style={{ fontWeight: 700, width: 44, textTransform: 'uppercase', fontSize: 12 }}>{docKey}</span>
-        <span style={{ width: 8, height: 8, borderRadius: '50%', background: st.color, flexShrink: 0 }} />
-        <span style={{ color: st.color, fontSize: 12, fontWeight: 600, minWidth: 90 }}>{st.label}</span>
-        <span className="text-muted" style={{ flex: 1, fontSize: 11 }}>{metaItems.join('  ·  ') || '-'}</span>
-        {hasDetail && <span className="text-muted" style={{ fontSize: 11 }}>{open ? '▲' : '▼'} {fns.length}개</span>}
-      </div>
-      {open && hasDetail && (
-        <div style={{ padding: '4px 8px 10px 60px' }}>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
-            {docKey === 'sts' || docKey === 'sds' ? '검토 필요 함수' : '변경 함수'}
-          </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-            {fns.slice(0, 40).map((fn, i) => (
-              <span key={i} style={{ fontSize: 11, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 4, padding: '1px 6px', fontFamily: 'monospace' }}>
-                {String(fn)}
-              </span>
-            ))}
-            {fns.length > 40 && <span className="text-muted" style={{ fontSize: 11 }}>+{fns.length - 40}개 더</span>}
-          </div>
         </div>
       )}
     </div>

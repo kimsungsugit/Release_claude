@@ -26,14 +26,29 @@ export default function ImpactGuideSection({ job, analysisResult }) {
   const [docFilter, setDocFilter] = useState('all');
   const [demoMode, setDemoMode] = useState(false);
 
-  // Demo data
+  // Impact data from analysis
+  const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
+  const changedFunctions = impact?.changed_function_types ?? {};
+  const changedFnEntries = Object.entries(changedFunctions);
+  const actions = impact?.actions ?? impact?.documents ?? {};
+  const linkedDocs = impact?._linked_docs ?? analysisResult?.scmList?.[0]?.linked_docs ?? {};
+  const impactGroups = impact?.impact ?? {};
+
+  // Demo data for testing — simulates real .c file changes
   const demoFunctions = {
-    'g_DrvIn_Main': 'BODY', 's_MotorSpdCtrl_AutoClose': 'BODY',
-    's_AntipinchDetect_Close': 'SIGNATURE', 'g_Ap_BuzzerCtrl_Func': 'BODY', 's_DoorStateCtrl': 'BODY',
+    'g_DrvIn_Main': 'BODY',
+    'g_DrvIn_MotorSpeed': 'BODY',
+    's_MotorSpdCtrl_AutoClose': 'BODY',
+    's_MotorSpdCtrl_AutoOpen': 'SIGNATURE',
+    's_AntipinchDetect_Close': 'BODY',
+    'g_Ap_BuzzerCtrl_Func': 'BODY',
+    's_DoorStateCtrl': 'BODY',
+    'g_SystemStatusCheck': 'VARIABLE',
   };
   const demoImpact = {
-    direct: ['g_DrvIn_Main', 's_MotorSpdCtrl_AutoClose', 's_AntipinchDetect_Close'],
-    indirect_1hop: ['g_Ap_BuzzerCtrl_Func'], indirect_2hop: ['s_DoorStateCtrl'],
+    direct: ['g_DrvIn_Main', 'g_DrvIn_MotorSpeed', 's_MotorSpdCtrl_AutoClose', 's_MotorSpdCtrl_AutoOpen', 's_AntipinchDetect_Close'],
+    indirect_1hop: ['g_Ap_BuzzerCtrl_Func', 's_DoorStateCtrl'],
+    indirect_2hop: ['g_SystemStatusCheck'],
   };
   const activeFnEntries = demoMode ? Object.entries(demoFunctions) : changedFnEntries;
   const activeImpactGroups = demoMode ? demoImpact : impactGroups;
@@ -57,13 +72,6 @@ export default function ImpactGuideSection({ job, analysisResult }) {
     }
     return items;
   }, [guide, hopFilter, docFilter, searchTerm]);
-
-  const changedFiles = impact?.trigger?.changed_files ?? impact?.changed_files ?? [];
-  const changedFunctions = impact?.changed_function_types ?? {};
-  const changedFnEntries = Object.entries(changedFunctions);
-  const actions = impact?.actions ?? impact?.documents ?? {};
-  const linkedDocs = impact?._linked_docs ?? analysisResult?.scmList?.[0]?.linked_docs ?? {};
-  const impactGroups = impact?.impact ?? {};
 
   // Build detailed guide
   const buildGuide = useCallback(async () => {
@@ -175,24 +183,16 @@ export default function ImpactGuideSection({ job, analysisResult }) {
   }, [activeFnEntries, linkedDocs, actions, activeImpactGroups, activeChangedFiles, toast]);
 
 
+  // Auto-enable demo if real data has no rich mappings (only header changes)
+  const hasRichData = activeFnEntries.length > 1 || (guide?.summary?.impactedReqs > 0);
+
   if (!impact && !demoMode) {
     return (
       <div className="empty-state">
         <div className="empty-icon">🔍</div>
         <div className="empty-title">변경 영향도 분석 결과가 없습니다</div>
         <div className="empty-desc">대시보드에서 동기화 & 분석을 실행하세요.<br />SCM에 base_ref가 설정되어야 변경 파일을 감지합니다.</div>
-        <button className="btn-sm" style={{ marginTop: 8 }} onClick={() => setDemoMode(true)}>데모 데이터로 보기</button>
-      </div>
-    );
-  }
-
-  if (activeFnEntries.length === 0 && !demoMode) {
-    return (
-      <div className="empty-state">
-        <div className="empty-icon">🔍</div>
-        <div className="empty-title">변경된 함수가 없습니다</div>
-        <div className="empty-desc">SCM에 변경 사항이 감지되지 않았습니다.</div>
-        <button className="btn-sm" style={{ marginTop: 8 }} onClick={() => setDemoMode(true)}>데모 데이터로 보기</button>
+        <button className="btn-primary btn-sm" style={{ marginTop: 8 }} onClick={() => setDemoMode(true)}>데모 시나리오로 보기</button>
       </div>
     );
   }
@@ -203,9 +203,14 @@ export default function ImpactGuideSection({ job, analysisResult }) {
       <div className="panel" style={{ marginBottom: 12 }}>
         <div className="panel-header">
           <span className="panel-title">변경 영향도 요약</span>
-          <button className="btn-primary btn-sm" onClick={buildGuide} disabled={loading}>
-            {loading ? '분석 중...' : '상세 가이드 생성'}
-          </button>
+          <div style={{ display: 'flex', gap: 4 }}>
+            <button className="btn-primary btn-sm" onClick={buildGuide} disabled={loading}>
+              {loading ? '분석 중...' : '상세 가이드 생성'}
+            </button>
+            <button className="btn-sm" onClick={() => setDemoMode(!demoMode)}>
+              {demoMode ? '실제 데이터' : '데모 시나리오'}
+            </button>
+          </div>
         </div>
 
         {demoMode && <div className="pill pill-warning" style={{ marginBottom: 8 }}>데모 모드 — 시뮬레이션 데이터</div>}
@@ -242,25 +247,49 @@ export default function ImpactGuideSection({ job, analysisResult }) {
         </div>
 
         {/* Document impact status */}
-        {Object.keys(actions).length > 0 && (
-          <div style={{ marginTop: 10 }}>
-            <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>문서별 영향</div>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {['uds', 'sts', 'suts', 'sits', 'sds'].map(k => {
-                const a = actions[k];
-                if (!a) return null;
-                const st = DOC_STATUS[a.status] || { tone: 'neutral', label: a.status };
-                return (
-                  <div key={k} style={{ padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg)', minWidth: 100 }}>
-                    <div style={{ fontWeight: 700, fontSize: 12, textTransform: 'uppercase' }}>{k}</div>
-                    <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
-                    {a.function_count > 0 && <span className="text-muted" style={{ fontSize: 10, marginLeft: 4 }}>{a.function_count} 함수</span>}
-                  </div>
-                );
-              })}
+        {(() => {
+          // Build doc stats from guide details or actions
+          const docStats = {};
+          if (guide) {
+            for (const d of guide.details) {
+              if (d.requirements.length > 0) { docStats.uds = (docStats.uds || 0) + 1; }
+              if (d.stsTestCases.length > 0) { docStats.sts = (docStats.sts || 0) + 1; }
+              if (d.sutsTestCases.length > 0) { docStats.suts = (docStats.suts || 0) + 1; }
+            }
+            // SDS/SITS always affected if any function changed
+            if (guide.details.length > 0) {
+              docStats.sds = guide.details.length;
+              docStats.sits = guide.details.filter(d => d.stsTestCases.length > 0).length || 0;
+            }
+          }
+          const docEntries = [
+            { key: 'uds', label: 'UDS', count: docStats.uds || actions.uds?.function_count || 0, status: actions.uds?.status },
+            { key: 'sts', label: 'STS', count: docStats.sts || actions.sts?.function_count || 0, status: actions.sts?.status, extra: guide ? `${guide.summary.impactedStsTCs} TC` : '' },
+            { key: 'suts', label: 'SUTS', count: docStats.suts || actions.suts?.function_count || 0, status: actions.suts?.status },
+            { key: 'sits', label: 'SITS', count: docStats.sits || actions.sits?.function_count || 0, status: actions.sits?.status },
+            { key: 'sds', label: 'SDS', count: docStats.sds || actions.sds?.function_count || 0, status: actions.sds?.status },
+          ];
+          return (
+            <div style={{ marginTop: 10 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>문서별 영향</div>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {docEntries.map(d => {
+                  const hasImpact = d.count > 0;
+                  const st = d.status ? (DOC_STATUS[d.status] || { tone: 'neutral', label: d.status })
+                    : (hasImpact ? { tone: 'warning', label: '검토 필요' } : { tone: 'neutral', label: '영향 없음' });
+                  return (
+                    <div key={d.key} style={{ padding: '6px 10px', borderRadius: 6, border: `1px solid ${hasImpact ? 'var(--color-warning)' : 'var(--border)'}`, background: 'var(--bg)', minWidth: 100 }}>
+                      <div style={{ fontWeight: 700, fontSize: 12, textTransform: 'uppercase' }}>{d.label}</div>
+                      <StatusBadge tone={st.tone}>{st.label}</StatusBadge>
+                      {d.count > 0 && <span className="text-muted" style={{ fontSize: 10, marginLeft: 4 }}>{d.count} 함수</span>}
+                      {d.extra && <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>{d.extra}</div>}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* Detailed guide */}
@@ -344,66 +373,99 @@ export default function ImpactGuideSection({ job, analysisResult }) {
           {selectedFn && (() => {
             const d = guide.details.find(x => x.function === selectedFn);
             if (!d) return null;
+            const ct = (d.changeType || '').toUpperCase();
             return (
-              <div style={{ marginTop: 12, padding: 12, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg)' }}>
-                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
-                  {d.function} <span className="pill pill-warning" style={{ fontSize: 10 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
+              <div style={{ marginTop: 12, padding: 14, border: '2px solid var(--accent)', borderRadius: 8, background: 'var(--bg)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                  <div>
+                    <span style={{ fontWeight: 700, fontSize: 15, fontFamily: 'monospace' }}>{d.function}</span>
+                    <span className="pill pill-warning" style={{ fontSize: 10, marginLeft: 8 }}>{CHANGE_TYPE_KO[d.changeType] || d.changeType}</span>
+                    <span className={`pill ${d.hop === 'direct' ? 'pill-danger' : 'pill-info'}`} style={{ fontSize: 10, marginLeft: 4 }}>{d.hop}</span>
+                  </div>
+                  {d.requirements.length > 0 && <span className="text-sm text-muted">영향 요구사항 {d.requirements.length}개</span>}
+                </div>
+
+                {/* Change description */}
+                <div style={{ padding: '8px 10px', background: 'var(--panel)', borderRadius: 6, marginBottom: 12, fontSize: 12, borderLeft: '3px solid var(--color-warning)' }}>
+                  {ct === 'BODY' && '함수 본문(로직)이 변경되었습니다. 동작 변경으로 인해 관련 문서의 Description, Test Action, Expected Result를 모두 재검토해야 합니다.'}
+                  {ct === 'SIGNATURE' && '함수 시그니처(파라미터/리턴타입)가 변경되었습니다. 호출하는 모든 함수와 Input/Output Parameters, Pre-condition을 업데이트해야 합니다.'}
+                  {ct === 'HEADER' && '헤더 파일이 변경되었습니다. 매크로/타입 정의 변경으로 이 헤더를 include하는 모든 소스 파일의 함수에 영향이 있을 수 있습니다.'}
+                  {ct === 'VARIABLE' && '글로벌 변수가 변경되었습니다. 이 변수를 읽고 쓰는 모든 함수의 동작을 확인해야 합니다.'}
+                  {ct === 'NEW' && '신규 함수가 추가되었습니다. UDS에 Function Information 항목을 추가하고, 관련 TC를 작성해야 합니다.'}
+                  {ct === 'DELETE' && '함수가 삭제되었습니다. UDS에서 해당 함수를 제거하고, 관련 TC를 비활성화해야 합니다.'}
                 </div>
 
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                   {/* UDS */}
-                  <div style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4, color: 'var(--accent)' }}>UDS 업데이트</div>
+                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📘 UDS 업데이트</div>
                     {d.requirements.length > 0 ? (
                       <>
-                        <div className="text-sm">함수 스펙 항목의 Description, Input/Output Parameters, Called/Calling Function을 변경 사항에 맞게 업데이트하세요.</div>
-                        <div style={{ marginTop: 4, fontSize: 10 }}>
-                          <span className="text-muted">관련 요구사항:</span> {d.requirements.join(', ')}
+                        <div className="text-sm" style={{ marginBottom: 6 }}>다음 항목을 확인하고 업데이트하세요:</div>
+                        <ul style={{ fontSize: 11, margin: '0 0 6px 16px', padding: 0 }}>
+                          {ct === 'BODY' && <><li>Description — 변경된 로직 반영</li><li>Called Function — 호출 함수 변경 여부</li><li>Used Globals — 사용 변수 변경 여부</li></>}
+                          {ct === 'SIGNATURE' && <><li>Prototype — 새 시그니처 반영</li><li>Input/Output Parameters — 파라미터 변경</li><li>Calling Function — 호출부 영향 확인</li></>}
+                          {ct === 'VARIABLE' && <><li>Used Globals (Global/Static) — 변수 정의 업데이트</li><li>Description — 변수 변경에 따른 동작 변경</li></>}
+                        </ul>
+                        <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                          관련 요구사항: {d.requirements.slice(0, 5).join(', ')}{d.requirements.length > 5 ? ` +${d.requirements.length - 5}개` : ''}
                         </div>
                       </>
                     ) : (
-                      <div className="text-sm">
-                        {(d.changeType || '').toUpperCase() === 'HEADER'
-                          ? '헤더 파일 변경 — 이 헤더를 include하는 모든 소스 파일의 함수 스펙을 확인하세요. 매크로/타입 정의 변경이 함수 동작에 영향을 줄 수 있습니다.'
-                          : 'UDS에 해당 함수 매핑이 없습니다. 신규 함수라면 UDS에 Function Information 항목을 추가하세요.'}
-                      </div>
+                      <div className="text-sm text-muted">직접 매핑 없음 — 간접 영향 확인 필요</div>
                     )}
                   </div>
 
                   {/* STS */}
-                  <div style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4, color: 'var(--accent)' }}>STS 검토</div>
+                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📗 STS 검토</div>
                     {d.stsTestCases.length > 0 ? (
                       <>
-                        <div className="text-sm"><strong>{d.stsTestCases.length}개 TC</strong>의 Pre-condition, Test Action, Expected Result를 검토하세요.</div>
-                        <div style={{ marginTop: 4, fontSize: 10, maxHeight: 80, overflow: 'auto' }}>
-                          {d.stsTestCases.slice(0, 15).map(tc => (
+                        <div className="text-sm" style={{ marginBottom: 6 }}><strong>{d.stsTestCases.length}개 TC</strong> 검토 필요:</div>
+                        <ul style={{ fontSize: 11, margin: '0 0 6px 16px', padding: 0 }}>
+                          {ct === 'BODY' && <><li>Test Action (Sequence) — 변경된 로직에 맞게 수정</li><li>Expected Result — 기대 결과 재확인</li><li>Pre-condition — 전제조건 변경 여부</li></>}
+                          {ct === 'SIGNATURE' && <><li>Pre-condition — 파라미터 변경 반영</li><li>Test Action — 호출 방식 변경</li><li>Expected Result — 리턴값 변경 확인</li></>}
+                          {ct === 'VARIABLE' && <><li>Test Action — 변수 초기값/설정 변경</li><li>Expected Result — 변수 기반 결과 변경</li></>}
+                        </ul>
+                        <div style={{ fontSize: 10, maxHeight: 60, overflow: 'auto' }}>
+                          {d.stsTestCases.slice(0, 10).map(tc => (
                             <span key={tc} className="pill pill-neutral" style={{ fontSize: 9, margin: 1 }}>{tc}</span>
                           ))}
-                          {d.stsTestCases.length > 15 && <span className="text-muted" style={{ fontSize: 9 }}> +{d.stsTestCases.length - 15}개</span>}
+                          {d.stsTestCases.length > 10 && <span className="text-muted" style={{ fontSize: 9 }}> +{d.stsTestCases.length - 10}개</span>}
                         </div>
                       </>
                     ) : (
-                      <div className="text-sm">
-                        {(d.changeType || '').toUpperCase() === 'HEADER'
-                          ? '헤더 변경으로 인한 간접 영향 — 관련 함수의 TC를 확인하세요.'
-                          : '직접 매핑된 TC 없음. 관련 요구사항의 TC를 수동 확인하세요.'}
-                      </div>
+                      <div className="text-sm text-muted">직접 매핑된 TC 없음 — 관련 요구사항의 TC를 수동 확인</div>
                     )}
                   </div>
 
                   {/* SUTS */}
-                  <div style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4, color: 'var(--accent)' }}>SUTS 업데이트</div>
+                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📙 SUTS 업데이트</div>
                     {d.sutsTestCases.length > 0 ? (
-                      <div className="text-sm">{d.sutsTestCases.length}개 단위 테스트 시퀀스의 Input/Expected Result를 업데이트하세요.</div>
-                    ) : <div className="text-sm text-muted">해당 단위 TC 없음</div>}
+                      <>
+                        <div className="text-sm" style={{ marginBottom: 4 }}><strong>{d.sutsTestCases.length}개</strong> 단위 테스트 시퀀스 수정:</div>
+                        <ul style={{ fontSize: 11, margin: '0 0 0 16px', padding: 0 }}>
+                          <li>Input Variables — 입력값 업데이트</li>
+                          <li>Output Variables — 기대 출력값 재검증</li>
+                          <li>Sequences — 테스트 시퀀스 순서 확인</li>
+                        </ul>
+                      </>
+                    ) : (
+                      <div className="text-sm text-muted">해당 단위 TC 없음{d.hop !== 'direct' ? ' (간접 영향)' : ''}</div>
+                    )}
                   </div>
 
                   {/* SDS */}
-                  <div style={{ padding: 8, border: '1px solid var(--border)', borderRadius: 6 }}>
-                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 4, color: 'var(--accent)' }}>SDS 확인</div>
-                    <div className="text-sm">해당 함수가 속한 SW Component의 인터페이스 및 동작 설명을 확인하세요.</div>
+                  <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 6 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 6, color: 'var(--accent)' }}>📋 SDS 확인</div>
+                    <div className="text-sm" style={{ marginBottom: 4 }}>SW Component 설계 문서 확인:</div>
+                    <ul style={{ fontSize: 11, margin: '0 0 0 16px', padding: 0 }}>
+                      {ct === 'SIGNATURE' && <li>Component Interface — 인터페이스 변경 반영</li>}
+                      <li>Component Description — 동작 설명 확인</li>
+                      <li>State Transition — 상태 전이 영향 확인</li>
+                      {d.hop !== 'direct' && <li>Component Interaction — 간접 호출 관계 확인</li>}
+                    </ul>
                   </div>
                 </div>
               </div>

@@ -1,6 +1,7 @@
-# /app/workflow/rag.py
+# workflow/rag/__init__.py
 # -*- coding: utf-8 -*-
 # RAG Knowledge Base (v30.4: directory-backed, atomic writes)
+# Package entry point - maintains backward compatibility with workflow.rag imports
 
 from __future__ import annotations
 
@@ -17,6 +18,30 @@ import logging
 import time as _time
 
 import numpy as np
+
+# -- re-export chunker functions (backward compat) --
+from workflow.rag.chunker import (
+    _read_text_from_file,
+    _read_and_chunk_file,
+    _chunk_text,
+    _chunk_source_file,
+    _extract_req_ids_from_text,
+    _chunk_by_req_ids,
+    _chunk_docx_by_heading,
+    _chunk_xlsx_rows,
+    _chunk_c_by_function,
+    REQ_ID_PATTERN,
+)
+
+# -- re-export ingestor functions (backward compat) --
+from workflow.rag.ingestor import (
+    _split_paths,
+    _collect_files_from_paths,
+    _infer_vectorcast_tags,
+    ingest_external_sources,
+    ingest_uds_reference,
+    ingest_runtime_summary,
+)
 
 _rag_logger = logging.getLogger("workflow.rag")
 _RAG_PERF_LOG = str(os.environ.get("DEVOPS_RAG_PERF_LOG", "0")).strip().lower() in ("1", "true", "yes")
@@ -51,310 +76,6 @@ def _normalize_message(msg: str) -> str:
     msg = re.sub(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z", "<TIME>", msg)
     msg = re.sub(r"\s+", " ", msg)
     return msg.strip()
-
-
-def _split_paths(val: Any) -> List[str]:
-    if not val:
-        return []
-    if isinstance(val, list):
-        return [str(v).strip() for v in val if str(v).strip()]
-    s = str(val or "").strip()
-    if not s:
-        return []
-    parts = [x.strip() for x in s.replace("\n", ",").replace(";", ",").split(",")]
-    return [p for p in parts if p]
-
-
-def _read_text_from_file(path: Path) -> str:
-    ext = path.suffix.lower()
-    try:
-        if ext in (".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml"):
-            return path.read_text(encoding="utf-8", errors="ignore")
-        if ext in (".html", ".htm"):
-            try:
-                from bs4 import BeautifulSoup  # type: ignore
-                html = path.read_text(encoding="utf-8", errors="ignore")
-                return BeautifulSoup(html, "html.parser").get_text("\n")
-            except Exception:
-                return path.read_text(encoding="utf-8", errors="ignore")
-        if ext in (".pdf",):
-            try:
-                try:
-                    import pdfplumber  # type: ignore
-                except Exception:
-                    pdfplumber = None  # type: ignore
-                texts = []
-                if pdfplumber:
-                    with pdfplumber.open(str(path)) as pdf:
-                        for idx, page in enumerate(pdf.pages, start=1):
-                            page_text = page.extract_text() or ""
-                            if page_text:
-                                texts.append(f"=== Page {idx} ===")
-                                texts.append(page_text)
-                            try:
-                                tables = page.extract_tables() or []
-                            except Exception:
-                                tables = []
-                            for t in tables:
-                                rows = []
-                                for row in t:
-                                    if not row:
-                                        continue
-                                    cells = [str(c or "").strip() for c in row]
-                                    if any(cells):
-                                        rows.append(" | ".join(cells))
-                                if rows:
-                                    texts.append("=== Table ===")
-                                    texts.extend(rows)
-                    return "\n".join(texts)
-                from pypdf import PdfReader  # type: ignore
-                reader = PdfReader(str(path))
-                texts = []
-                for idx, p in enumerate(reader.pages, start=1):
-                    try:
-                        page_text = p.extract_text() or ""
-                    except Exception:
-                        page_text = ""
-                    if page_text:
-                        texts.append(f"=== Page {idx} ===")
-                        texts.append(page_text)
-                return "\n".join(texts)
-            except Exception:
-                return ""
-        if ext in (".docx",):
-            try:
-                import docx  # type: ignore
-                doc = docx.Document(str(path))
-                lines = []
-                for p in doc.paragraphs:
-                    text = (p.text or "").strip()
-                    if not text:
-                        continue
-                    style = str(getattr(p, "style", "") or "")
-                    style_name = ""
-                    try:
-                        style_name = p.style.name  # type: ignore
-                    except Exception:
-                        style_name = str(style)
-                    if "Heading" in style_name:
-                        level = re.findall(r"\d+", style_name)
-                        prefix = "#" * int(level[0]) if level else "##"
-                        lines.append(f"{prefix} {text}")
-                    elif "TOC" in style_name or "Table of Contents" in style_name:
-                        lines.append(f"TOC: {text}")
-                    else:
-                        lines.append(text)
-                for table in doc.tables:
-                    rows = []
-                    for row in table.rows:
-                        cells = [c.text.strip() for c in row.cells]
-                        if any(cells):
-                            rows.append(" | ".join(cells))
-                    if rows:
-                        lines.append("=== Table ===")
-                        lines.extend(rows)
-                return "\n".join(lines)
-            except Exception:
-                return ""
-    except Exception:
-        return ""
-    return ""
-
-
-def _chunk_text(text: str, *, chunk_size: int = 1200, overlap: int = 200) -> List[str]:
-    text = (text or "").strip()
-    if not text:
-        return []
-    if chunk_size <= 0:
-        return [text]
-    out: List[str] = []
-    step = max(1, chunk_size - max(0, overlap))
-    for i in range(0, len(text), step):
-        out.append(text[i : i + chunk_size])
-    return [c for c in out if c.strip()]
-
-
-REQ_ID_PATTERN = re.compile(r"\b(?:REQ|SDS|SW|SWS|SWR|SRS|SWC|REQS)\s*[-_:]?\s*[A-Za-z0-9_.-]+\b")
-
-
-def _extract_req_ids_from_text(text: str) -> List[str]:
-    if not text:
-        return []
-    ids = [m.group(0).replace(" ", "").strip() for m in REQ_ID_PATTERN.finditer(text)]
-    uniq: List[str] = []
-    seen = set()
-    for rid in ids:
-        if not rid or rid in seen:
-            continue
-        seen.add(rid)
-        uniq.append(rid)
-    return uniq
-
-
-def _chunk_by_req_ids(text: str, *, chunk_size: int, overlap: int) -> List[str]:
-    text = (text or "").strip()
-    if not text:
-        return []
-    matches = list(REQ_ID_PATTERN.finditer(text))
-    if len(matches) < 2:
-        return _chunk_text(text, chunk_size=chunk_size, overlap=overlap)
-    chunks: List[str] = []
-    for idx, m in enumerate(matches):
-        start = m.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        seg = text[start:end].strip()
-        if not seg:
-            continue
-        if len(seg) > chunk_size * 2:
-            chunks.extend(_chunk_text(seg, chunk_size=chunk_size, overlap=overlap))
-        else:
-            chunks.append(seg)
-    return [c for c in chunks if c.strip()]
-
-
-def _chunk_docx_by_heading(path: Path, *, chunk_size: int, overlap: int) -> List[str]:
-    try:
-        import docx  # type: ignore
-    except Exception:
-        return []
-    try:
-        doc = docx.Document(str(path))
-    except Exception:
-        return []
-    sections: List[Tuple[str, List[str]]] = []
-    current_title = ""
-    current_lines: List[str] = []
-    for p in doc.paragraphs:
-        text = (p.text or "").strip()
-        if not text:
-            continue
-        style_name = ""
-        try:
-            style_name = p.style.name  # type: ignore
-        except Exception:
-            style_name = str(getattr(p, "style", "") or "")
-        if "Heading" in style_name:
-            if current_lines:
-                sections.append((current_title, current_lines))
-            current_title = text
-            current_lines = []
-            continue
-        current_lines.append(text)
-    if current_lines:
-        sections.append((current_title, current_lines))
-    chunks: List[str] = []
-    for title, lines in sections:
-        block = "\n".join([title.strip(), "\n".join(lines).strip()]).strip()
-        if not block:
-            continue
-        chunks.extend(_chunk_by_req_ids(block, chunk_size=chunk_size, overlap=overlap))
-    return [c for c in chunks if c.strip()]
-
-
-def _chunk_xlsx_rows(path: Path, *, chunk_size: int, overlap: int) -> List[str]:
-    try:
-        import pandas as pd  # type: ignore
-    except Exception:
-        return []
-    chunks: List[str] = []
-    try:
-        sheets = pd.read_excel(str(path), sheet_name=None)
-    except Exception:
-        return []
-    for sheet_name, df in sheets.items():
-        if df is None:
-            continue
-        try:
-            records = df.fillna("").to_dict(orient="records")
-        except Exception:
-            continue
-        for idx, row in enumerate(records):
-            payload = {"sheet": sheet_name, "row_index": idx + 1, "data": row}
-            text = json.dumps(payload, ensure_ascii=False)
-            chunks.extend(_chunk_text(text, chunk_size=chunk_size, overlap=overlap))
-    return [c for c in chunks if c.strip()]
-
-
-def _chunk_c_by_function(path: Path, *, chunk_size: int, overlap: int) -> List[str]:
-    """AST-based chunking for C/H files: one chunk per function definition."""
-    try:
-        from workflow.code_parser.c_parser import parse_c_project
-    except ImportError:
-        return []
-    try:
-        src = path.read_text(encoding="utf-8", errors="replace")
-    except Exception:
-        return []
-    chunks: List[str] = []
-    func_pattern = re.compile(
-        r"(?:^|\n)"
-        r"((?:/\*[\s\S]*?\*/\s*|//[^\n]*\n\s*)*)"
-        r"((?:static\s+|inline\s+|extern\s+|const\s+)*\w[\w\s*]+\s+\w+\s*\([^)]*\)\s*\{)",
-        re.MULTILINE,
-    )
-    last_end = 0
-    for m in func_pattern.finditer(src):
-        start = m.start()
-        brace_count = 0
-        body_start = src.index("{", m.start(2))
-        pos = body_start
-        while pos < len(src):
-            if src[pos] == "{":
-                brace_count += 1
-            elif src[pos] == "}":
-                brace_count -= 1
-                if brace_count == 0:
-                    func_text = src[start:pos + 1].strip()
-                    if len(func_text) > chunk_size:
-                        func_text = func_text[:chunk_size]
-                    if func_text:
-                        chunks.append(f"[{path.name}]\n{func_text}")
-                    last_end = pos + 1
-                    break
-            pos += 1
-    if not chunks:
-        return _chunk_text(src, chunk_size=chunk_size, overlap=overlap)
-    return chunks
-
-
-def _chunk_source_file(
-    path: Path,
-    *,
-    chunk_size: int,
-    overlap: int,
-    max_chunks: int,
-) -> List[str]:
-    ext = path.suffix.lower()
-    if ext == ".docx":
-        chunks = _chunk_docx_by_heading(path, chunk_size=chunk_size, overlap=overlap)
-    elif ext == ".xlsx":
-        chunks = _chunk_xlsx_rows(path, chunk_size=chunk_size, overlap=overlap)
-    elif ext == ".pdf":
-        text = _read_text_from_file(path)
-        chunks = _chunk_by_req_ids(text, chunk_size=chunk_size, overlap=overlap)
-    elif ext in {".c", ".h", ".cpp", ".hpp"}:
-        chunks = _chunk_c_by_function(path, chunk_size=chunk_size, overlap=overlap)
-    else:
-        text = _read_text_from_file(path)
-        chunks = _chunk_text(text, chunk_size=chunk_size, overlap=overlap)
-    return chunks[:max(1, int(max_chunks))]
-
-
-def _read_and_chunk_file(
-    path: Path,
-    *,
-    chunk_size: int = 1200,
-    overlap: int = 200,
-    max_chunks: int = 12,
-) -> List[str]:
-    if not path or not Path(path).exists():
-        return []
-    return _chunk_source_file(
-        Path(path),
-        chunk_size=int(chunk_size or 1200),
-        overlap=int(overlap or 0),
-        max_chunks=int(max_chunks or 1),
-    )
 
 
 class KnowledgeBase:
@@ -591,8 +312,9 @@ class KnowledgeBase:
         try:
             cur = conn.cursor()
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            _embed_dim = int(getattr(config, "RAG_EMBED_DIM", 768))
             cur.execute(
-                """
+                f"""
                 CREATE TABLE IF NOT EXISTS kb_entries (
                     id TEXT PRIMARY KEY,
                     error_raw TEXT,
@@ -603,7 +325,7 @@ class KnowledgeBase:
                     stage TEXT,
                     category TEXT,
                     context TEXT,
-                    vector VECTOR(64),
+                    vector VECTOR({_embed_dim}),
                     weight REAL,
                     apply_count INTEGER,
                     timestamp TEXT,
@@ -1060,11 +782,10 @@ class KnowledgeBase:
 
     def _load_all(self) -> None:
         started = _time.perf_counter()
-        started = _time.perf_counter()
         if self.storage == "pgvector" and self._pg_ok:
             self.data.clear()
             return
-        # 1) 레거시 단일 JSON 파일 → 디렉터리로 마이그레이션 (최초 1회)
+        # 1) 레거시 단일 JSON 파일 -> 디렉터리로 마이그레이션 (최초 1회)
         legacy = self.base_dir.parent / "knowledge_base.json"
         has_entries = any(True for _ in self._iter_entry_files())
         if legacy.exists() and not has_entries:
@@ -1128,68 +849,8 @@ class KnowledgeBase:
         self.data.append(entry)
 
     def _get_embedding(self, text: str) -> List[float]:
-        text = text.strip()
-        if not text:
-            return []
-        if text in self._embed_cache:
-            vec = self._embed_cache.pop(text)
-            self._embed_cache[text] = vec
-            return vec
-        # 1) 외부 임베딩 API 사용 시 (with retry)
-        embed_url = os.environ.get("KB_EMBED_URL")
-        if requests is not None and embed_url:
-            last_err = None
-            for attempt in range(2):
-                try:
-                    resp = requests.post(
-                        embed_url,
-                        json={"text": text},
-                        timeout=5,
-                    )
-                    resp.raise_for_status()
-                    vec = resp.json().get("vector") or []
-                    out = [float(v) for v in vec]
-                    if self._embed_cache_max > 0:
-                        self._embed_cache[text] = out
-                        while len(self._embed_cache) > self._embed_cache_max:
-                            self._embed_cache.popitem(last=False)
-                    return out
-                except Exception as e:
-                    last_err = e
-                    if attempt == 0:
-                        _rag_logger.warning("Embedding API failed (attempt 1), retrying: %s", e)
-                        _time.sleep(1.5)
-            _rag_logger.warning(
-                "Embedding API failed after retries, using local fallback: %s", last_err
-            )
-        # 2) 로컬 sentence-transformers 모델
-        try:
-            if not hasattr(self, "_st_model"):
-                from sentence_transformers import SentenceTransformer
-                self._st_model = SentenceTransformer("all-MiniLM-L6-v2")
-                _rag_logger.info("Loaded local embedding model: all-MiniLM-L6-v2")
-            if hasattr(self, "_st_model") and self._st_model is not None:
-                vec = self._st_model.encode(text).tolist()
-                out = [float(v) for v in vec]
-                if self._embed_cache_max > 0:
-                    self._embed_cache[text] = out
-                    while len(self._embed_cache) > self._embed_cache_max:
-                        self._embed_cache.popitem(last=False)
-                return out
-        except ImportError:
-            self._st_model = None
-        except Exception as e:
-            _rag_logger.warning("Local embedding model failed: %s", e)
-            self._st_model = None
-        # 3) 로컬 난수 기반 임베딩 (동일 입력 -> 동일 벡터 위해 seed 고정)
-        seed = abs(hash(text)) % (2**32)
-        rng = np.random.default_rng(seed)
-        out = rng.normal(size=64).astype(float).tolist()
-        if self._embed_cache_max > 0:
-            self._embed_cache[text] = out
-            while len(self._embed_cache) > self._embed_cache_max:
-                self._embed_cache.popitem(last=False)
-        return out
+        from workflow.rag.embedder import get_embedding
+        return get_embedding(text)
 
     # ---------------- 퍼블릭 API ----------------
 
@@ -1208,10 +869,13 @@ class KnowledgeBase:
         에러 메시지를 기반으로 과거 성공 패턴 검색
         """
         started = _time.perf_counter()
+
+        norm_cats = [str(c) for c in (categories or []) if str(c).strip()]
+        if category:
+            norm_cats.append(str(category))
+
         if self.storage == "pgvector" and self._pg_ok:
-            norm_cats = [str(c) for c in (categories or []) if str(c).strip()]
-            if category:
-                norm_cats.append(str(category))
+            # pgvector: 기존 DB 레벨 검색 유지
             query = _normalize_message(error_msg)
             req_ids = _extract_req_ids_from_text(query)
             q_vec = self._get_embedding(query)
@@ -1225,105 +889,16 @@ class KnowledgeBase:
                 categories=norm_cats or None,
                 req_ids=req_ids,
             )
-            if _RAG_PERF_LOG:
-                _rag_logger.info(
-                    "rag_search storage=%s entries=%d query_chars=%d top_k=%d hits=%d elapsed_ms=%.1f",
-                    self.storage,
-                    len(self.data),
-                    len(query),
-                    top_k,
-                    len(rows),
-                    (_time.perf_counter() - started) * 1000.0,
-                )
-            return rows
+        else:
+            # SQLite: hybrid search 사용
+            from workflow.rag.searcher import hybrid_search
+            query = _normalize_message(error_msg)
+            rows = hybrid_search(
+                self.data, query, top_k,
+                tags=tags, role=role, stage=stage,
+                categories=norm_cats or None,
+            )
 
-        if not self.data:
-            return []
-
-        query = _normalize_message(error_msg)
-        if not query:
-            return []
-
-        q_vec = np.array(self._get_embedding(query), dtype=float)
-        if q_vec.size == 0:
-            return []
-
-        norm_tags = [str(t) for t in (tags or []) if str(t).strip()]
-        norm_categories = [str(c) for c in (categories or []) if str(c).strip()]
-        if category:
-            norm_categories.append(str(category))
-        role = str(role) if role else None
-        stage = str(stage) if stage else None
-
-        results: List[Dict[str, Any]] = []
-        project_boost = float(getattr(config, "RAG_PROJECT_BOOST", 0.0))
-        recency_days = float(getattr(config, "RAG_RECENCY_DAYS", 0))
-        recency_boost = float(getattr(config, "RAG_RECENCY_BOOST", 0.0))
-        apply_boost = float(getattr(config, "RAG_APPLY_COUNT_BOOST", 0.0))
-        error_boost = float(getattr(config, "RAG_ERROR_COUNT_BOOST", 0.0))
-        req_ids = _extract_req_ids_from_text(query)
-        exact_boost = float(getattr(config, "RAG_EXACT_MATCH_BOOST", 0.4))
-        for idx, ent in enumerate(self.data):
-            v = ent.get("vector") or self._get_embedding(ent["error_clean"])
-            v_arr = np.array(v, dtype=float)
-            score = _cosine(q_vec, v_arr) * float(ent.get("weight", 1.0))
-            if role and ent.get("role") == role:
-                score += 0.15
-            if stage and ent.get("stage") == stage:
-                score += 0.1
-            if norm_categories:
-                ent_cat = str(ent.get("category") or "")
-                if ent_cat in norm_categories:
-                    score += 0.12
-                else:
-                    continue
-            if norm_tags:
-                ent_tags = set(ent.get("tags") or [])
-                hit = len(ent_tags.intersection(norm_tags))
-                if hit:
-                    score += 0.05 * hit
-            if recency_days > 0 and ent.get("timestamp"):
-                try:
-                    ts = datetime.fromisoformat(str(ent.get("timestamp")))
-                    delta_days = (datetime.utcnow() - ts).total_seconds() / 86400.0
-                    if delta_days < recency_days:
-                        score += recency_boost * (1.0 - (delta_days / recency_days))
-                except Exception:
-                    pass
-            if project_boost > 0 and ent.get("project_root"):
-                if str(ent.get("project_root")) in error_msg:
-                    score += project_boost
-            if apply_boost > 0:
-                try:
-                    score += apply_boost * float(ent.get("apply_count") or 0)
-                except Exception:
-                    pass
-            if error_boost > 0:
-                try:
-                    score += error_boost * float(ent.get("error_count") or 0)
-                except Exception:
-                    pass
-            if req_ids:
-                hay = " ".join(
-                    [
-                        str(ent.get("error_raw") or ""),
-                        str(ent.get("error_clean") or ""),
-                        str(ent.get("context") or ""),
-                        str(ent.get("source_file") or ""),
-                        json.dumps(ent.get("metadata") or {}, ensure_ascii=False),
-                    ]
-                )
-                if any(rid in hay for rid in req_ids):
-                    score += exact_boost
-            if score <= 0.0:
-                continue
-            item = dict(ent)
-            item["index"] = idx
-            item["score"] = score
-            results.append(item)
-
-        results.sort(key=lambda x: x["score"], reverse=True)
-        rows = results[:top_k]
         if _RAG_PERF_LOG:
             _rag_logger.info(
                 "rag_search storage=%s entries=%d query_chars=%d top_k=%d hits=%d elapsed_ms=%.1f",
@@ -1367,13 +942,17 @@ class KnowledgeBase:
                     continue
                 if stage and ent.get("stage") not in (None, stage):
                     continue
-                # 이미 동일 패턴 존재 → weight만 조금 올리고 종료
+                # 이미 동일 패턴 존재 -> weight만 조금 올리고 종료
                 ent["weight"] = float(ent.get("weight", 1.0)) + 0.1
                 ent["apply_count"] = int(ent.get("apply_count", 0)) + 1
                 ent["error_count"] = int(ent.get("error_count", 0)) + 1
                 if project_root:
                     ent["project_root"] = project_root
-                path = self.base_dir / ent["source_file"]
+                sf = ent.get("source_file") or ""
+                if not sf:
+                    sf = f"{ent['id']}.json"
+                    ent["source_file"] = sf
+                path = self.base_dir / sf
                 self._write_atomic(path, ent)
                 if self.storage == "pgvector":
                     self._pg_upsert(ent)
@@ -1468,330 +1047,6 @@ class KnowledgeBase:
             self._pg_upsert(ent)
         else:
             self._db_upsert(ent)
-
-
-def _collect_files_from_paths(
-    paths: Iterable[str],
-    *,
-    exts: Optional[Tuple[str, ...]] = None,
-    globs: Optional[List[str]] = None,
-    max_files: int = 200,
-) -> List[Path]:
-    files: List[Path] = []
-    for p in paths:
-        try:
-            path = Path(p).expanduser()
-        except Exception:
-            continue
-        if path.is_file():
-            files.append(path)
-            continue
-        if path.is_dir():
-            if globs:
-                for g in globs:
-                    for hit in path.glob(g):
-                        if hit.is_file():
-                            files.append(hit)
-            else:
-                for hit in path.rglob("*"):
-                    if hit.is_file():
-                        files.append(hit)
-    if exts:
-        files = [f for f in files if f.suffix.lower() in exts]
-    # dedup + cap
-    uniq: Dict[str, Path] = {}
-    for f in files:
-        uniq[str(f.resolve())] = f
-    return list(uniq.values())[: max(1, int(max_files))]
-
-
-def _infer_vectorcast_tags(path: Path) -> List[str]:
-    name = path.name.lower()
-    tags = ["vectorcast"]
-    if "ut" in name or "unit" in name:
-        tags.append("ut")
-    if "it" in name or "integration" in name:
-        tags.append("it")
-    if "coverage" in name:
-        tags.append("coverage")
-    return tags
-
-
-def ingest_external_sources(kb: KnowledgeBase, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    cfg = cfg or {}
-    enabled = bool(getattr(config, "RAG_INGEST_ENABLE", True))
-    if not enabled:
-        return {"enabled": False, "reason": "disabled"}
-
-    max_files = int(cfg.get("rag_ingest_max_files") or getattr(config, "RAG_INGEST_MAX_FILES", 200))
-    max_chunks = int(
-        cfg.get("rag_ingest_max_chunks") or getattr(config, "RAG_INGEST_MAX_CHUNKS_PER_FILE", 12)
-    )
-    chunk_size = int(cfg.get("rag_chunk_size") or getattr(config, "RAG_CHUNK_SIZE", 1200))
-    overlap = int(cfg.get("rag_chunk_overlap") or getattr(config, "RAG_CHUNK_OVERLAP", 200))
-
-    vc_paths = _split_paths(cfg.get("vc_reports_paths") or getattr(config, "VC_REPORTS_PATHS", ""))
-    uds_paths = _split_paths(cfg.get("uds_spec_paths") or getattr(config, "UDS_SPEC_PATHS", ""))
-    req_paths = _split_paths(cfg.get("req_docs_paths") or getattr(config, "REQ_DOCS_PATHS", ""))
-    code_paths = _split_paths(cfg.get("codebase_paths") or getattr(config, "CODEBASE_PATHS", ""))
-
-    idx = kb._load_external_index()
-    updated = 0
-    skipped = 0
-
-    def _ingest(
-        paths: List[str],
-        *,
-        category: str,
-        tags: Any,
-        exts: Tuple[str, ...],
-        globs: Optional[List[str]] = None,
-    ):
-        nonlocal updated, skipped, idx
-        files = _collect_files_from_paths(paths, exts=exts, globs=globs, max_files=max_files)
-        for fp in files:
-            try:
-                sig = f"{fp.stat().st_mtime_ns}:{fp.stat().st_size}"
-            except Exception:
-                sig = ""
-            key = f"{category}:{fp.as_posix()}"
-            if sig and idx.get(key) == sig:
-                skipped += 1
-                continue
-
-            chunks = _chunk_source_file(
-                fp,
-                chunk_size=chunk_size,
-                overlap=overlap,
-                max_chunks=max_chunks,
-            )
-            if not chunks:
-                skipped += 1
-                continue
-            use_tags: List[str] = []
-            try:
-                if callable(tags):
-                    use_tags = list(tags(fp))
-                elif isinstance(tags, list):
-                    use_tags = list(tags)
-            except Exception:
-                use_tags = []
-
-            for i, ch in enumerate(chunks):
-                title = f"{category}:{fp.name}#{i+1}"
-                kb.add_document(
-                    title=title,
-                    content=ch,
-                    category=category,
-                    tags=use_tags,
-                    source_file=str(fp),
-                )
-                updated += 1
-            if sig:
-                idx[key] = sig
-
-    if vc_paths:
-        _ingest(
-            vc_paths,
-            category="vectorcast",
-            tags=_infer_vectorcast_tags,
-            exts=(".html", ".htm", ".csv", ".txt", ".log"),
-        )
-    if uds_paths:
-        _ingest(
-            uds_paths,
-            category="uds",
-            tags=["uds"],
-            exts=(".pdf", ".docx", ".txt", ".md", ".xlsx"),
-        )
-    if req_paths:
-        _ingest(
-            req_paths,
-            category="requirements",
-            tags=["requirements"],
-            exts=(".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx"),
-        )
-    if code_paths:
-        _ingest(
-            code_paths,
-            category="code",
-            tags=["code"],
-            exts=(".c", ".h", ".cpp", ".hpp"),
-            globs=list(getattr(config, "CODE_RAG_GLOBS", [])) or None,
-        )
-
-    if updated or skipped:
-        kb._save_external_index(idx)
-    return {"enabled": True, "updated": updated, "skipped": skipped}
-
-
-def ingest_uds_reference(
-    kb: KnowledgeBase,
-    *,
-    ref_suds_path: Optional[str] = None,
-    function_details: Optional[Dict[str, Any]] = None,
-    globals_info_map: Optional[Dict[str, Any]] = None,
-    req_map: Optional[Dict[str, Any]] = None,
-) -> Dict[str, int]:
-    """Ingest UDS-specific data into RAG KB with specialized categories."""
-    counts = {"uds_description": 0, "uds_globals": 0, "uds_requirements": 0, "uds_reference": 0}
-
-    if ref_suds_path:
-        rpath = Path(ref_suds_path)
-        if rpath.exists() and rpath.suffix.lower() == ".docx":
-            chunks = _chunk_source_file(rpath, chunk_size=1500, overlap=300, max_chunks=50)
-            for i, ch in enumerate(chunks):
-                kb.add_document(
-                    title=f"uds_reference:{rpath.name}#{i+1}",
-                    content=ch,
-                    category="uds_description",
-                    tags=["uds_description", "reference"],
-                    source_file=str(rpath),
-                )
-                counts["uds_reference"] += 1
-
-    if isinstance(function_details, dict):
-        batch_lines: List[str] = []
-        for fid, info in function_details.items():
-            if not isinstance(info, dict):
-                continue
-            desc = str(info.get("description") or "").strip()
-            dsrc = str(info.get("description_source") or "").strip()
-            if dsrc in {"comment", "sds", "reference"} and desc and len(desc) > 10:
-                fname = str(info.get("name") or "").strip()
-                proto = str(info.get("prototype") or "").strip()[:100]
-                batch_lines.append(f"{fname}: {desc} [{proto}]")
-                if len(batch_lines) >= 20:
-                    kb.add_document(
-                        title=f"uds_description:batch_{counts['uds_description']}",
-                        content="\n".join(batch_lines),
-                        category="uds_description",
-                        tags=["uds_description"],
-                    )
-                    counts["uds_description"] += 1
-                    batch_lines = []
-        if batch_lines:
-            kb.add_document(
-                title=f"uds_description:batch_{counts['uds_description']}",
-                content="\n".join(batch_lines),
-                category="uds_description",
-                tags=["uds_description"],
-            )
-            counts["uds_description"] += 1
-
-    if isinstance(globals_info_map, dict) and globals_info_map:
-        globals_lines: List[str] = []
-        for gname, ginfo in globals_info_map.items():
-            if not isinstance(ginfo, dict):
-                continue
-            gtype = str(ginfo.get("type") or "").strip()
-            gfile = Path(str(ginfo.get("file") or "")).name
-            gdesc = str(ginfo.get("desc") or "").strip()
-            globals_lines.append(f"{gname} ({gtype}) [{gfile}] {gdesc}".strip())
-            if len(globals_lines) >= 30:
-                kb.add_document(
-                    title=f"uds_globals:batch_{counts['uds_globals']}",
-                    content="\n".join(globals_lines),
-                    category="uds_globals",
-                    tags=["uds_globals", "globals"],
-                )
-                counts["uds_globals"] += 1
-                globals_lines = []
-        if globals_lines:
-            kb.add_document(
-                title=f"uds_globals:batch_{counts['uds_globals']}",
-                content="\n".join(globals_lines),
-                category="uds_globals",
-                tags=["uds_globals", "globals"],
-            )
-            counts["uds_globals"] += 1
-
-    if isinstance(req_map, dict) and req_map:
-        req_lines: List[str] = []
-        for rid, rinfo in req_map.items():
-            if isinstance(rinfo, dict):
-                rdesc = str(rinfo.get("description") or rinfo.get("text") or "").strip()
-                req_lines.append(f"{rid}: {rdesc[:200]}")
-            elif isinstance(rinfo, str):
-                req_lines.append(f"{rid}: {rinfo[:200]}")
-            if len(req_lines) >= 25:
-                kb.add_document(
-                    title=f"uds_requirements:batch_{counts['uds_requirements']}",
-                    content="\n".join(req_lines),
-                    category="uds_requirements",
-                    tags=["uds_requirements", "requirements"],
-                )
-                counts["uds_requirements"] += 1
-                req_lines = []
-        if req_lines:
-            kb.add_document(
-                title=f"uds_requirements:batch_{counts['uds_requirements']}",
-                content="\n".join(req_lines),
-                category="uds_requirements",
-                tags=["uds_requirements", "requirements"],
-            )
-            counts["uds_requirements"] += 1
-
-    _rag_logger.info("UDS reference ingestion: %s", counts)
-    return counts
-
-
-def ingest_runtime_summary(kb: KnowledgeBase, summary: Dict[str, Any], report_dir: Path) -> Dict[str, Any]:
-    if not bool(getattr(config, "RAG_INGEST_RUNTIME_ENABLE", True)):
-        return {"enabled": False, "reason": "disabled"}
-    updated = 0
-
-    def _add_runtime(category: str, title: str, content: str, source_file: str) -> None:
-        nonlocal updated
-        kb.add_document(
-            title=title,
-            content=content[: int(getattr(config, "RAG_CONTEXT_MAX_CHARS", 4000))],
-            category=category,
-            tags=[category, "runtime"],
-            source_file=source_file,
-        )
-        updated += 1
-
-    build = summary.get("build", {}) if isinstance(summary.get("build"), dict) else {}
-    coverage = summary.get("coverage", {}) if isinstance(summary.get("coverage"), dict) else {}
-    tests = summary.get("tests", {}) if isinstance(summary.get("tests"), dict) else {}
-
-    build_ctx = json.dumps(
-        {
-            "reason": build.get("reason"),
-            "data": build.get("data", {}),
-        },
-        ensure_ascii=False,
-    )
-    _add_runtime("build", "runtime:build", build_ctx, "runtime:build")
-
-    tests_ctx = json.dumps(
-        {
-            "enabled": tests.get("enabled"),
-            "mode": tests.get("mode"),
-            "results": tests.get("results", [])[:50],
-            "execution": tests.get("execution", {}),
-        },
-        ensure_ascii=False,
-    )
-    _add_runtime("tests", "runtime:tests", tests_ctx, "runtime:tests")
-
-    cov_ctx = json.dumps(
-        {
-            "enabled": coverage.get("enabled"),
-            "ok": coverage.get("ok"),
-            "line_rate": coverage.get("line_rate"),
-            "line_rate_pct": coverage.get("line_rate_pct"),
-            "branch_rate": coverage.get("branch_rate"),
-            "branch_rate_pct": coverage.get("branch_rate_pct"),
-            "threshold": coverage.get("threshold"),
-            "reason": coverage.get("reason") or coverage.get("parse_error"),
-        },
-        ensure_ascii=False,
-    )
-    _add_runtime("coverage", "runtime:coverage", cov_ctx, "runtime:coverage")
-
-    return {"ok": True, "updated": updated, "report_dir": str(report_dir)}
 
 
 def get_kb(report_dir: Path) -> KnowledgeBase:

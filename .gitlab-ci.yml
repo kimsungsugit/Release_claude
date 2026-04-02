@@ -1,6 +1,7 @@
 stages:
   - lint
   - test
+  - frontend
 
 variables:
   GIT_SSL_NO_VERIFY: "1"
@@ -50,6 +51,21 @@ unit-tests:
     - echo "=== Running Unit Tests ==="
     - python -m pytest tests/unit/ -q --tb=short
   timeout: 15m
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+  allow_failure: false
+
+# Frontend tests
+frontend-tests:
+  stage: frontend
+  tags:
+    - shared
+  script:
+    - cd frontend-v2
+    - npm ci
+    - npm test
+  timeout: 10m
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'

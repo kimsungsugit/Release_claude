@@ -3,6 +3,7 @@ import { getInitialTheme, saveTheme, loadJenkinsConfig, saveJenkinsConfig, getUs
 import Dashboard from './views/Dashboard.jsx';
 import Detail from './views/Detail.jsx';
 import Settings from './views/Settings.jsx';
+import QualityDashboard from './views/QualityDashboard.jsx';
 import ErrorBoundary from './components/ErrorBoundary.jsx';
 
 /* ── Toast context ─────────────────────────────────────────────────── */
@@ -192,6 +193,7 @@ function StatusFooter() {
 const TABS = [
   { id: 'dashboard', label: '대시보드' },
   { id: 'detail',    label: '세부 데이터' },
+  { id: 'quality',   label: 'Quality' },
   { id: 'settings',  label: '설정' },
 ];
 
@@ -258,16 +260,18 @@ export default function App() {
               </span>
               <div className="header-spacer" />
               <div className="header-actions">
-                <button className="btn-icon" onClick={toggleTheme} title="테마 전환">
+                <button className="btn-icon" onClick={toggleTheme} title="테마 전환" aria-label="테마 전환">
                   {theme === 'dark' ? '☀️' : '🌙'}
                 </button>
               </div>
             </header>
 
-            <nav className="tab-bar">
+            <nav className="tab-bar" role="tablist">
               {TABS.map(t => (
                 <button
                   key={t.id}
+                  role="tab"
+                  aria-selected={activeTab === t.id}
                   className={`tab-item${activeTab === t.id ? ' active' : ''}`}
                   onClick={() => setActiveTab(t.id)}
                 >
@@ -284,6 +288,9 @@ export default function App() {
                   </div>
                   <div style={{ display: activeTab === 'detail' ? 'block' : 'none' }}>
                     <Detail />
+                  </div>
+                  <div style={{ display: activeTab === 'quality' ? 'block' : 'none' }}>
+                    <QualityDashboard />
                   </div>
                   <div style={{ display: activeTab === 'settings' ? 'block' : 'none' }}>
                     <Settings />

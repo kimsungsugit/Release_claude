@@ -5,8 +5,29 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+
+def _safe_int(env_key: str, default: int) -> int:
+    """Safely parse an integer from environment variable, returning default on failure."""
+    val = os.environ.get(env_key, str(default))
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        logging.warning("config: env %s=%r is not a valid int, using default %d", env_key, val, default)
+        return default
+
+
+def _safe_float(env_key: str, default: float) -> float:
+    """Safely parse a float from environment variable, returning default on failure."""
+    val = os.environ.get(env_key, str(default))
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        logging.warning("config: env %s=%r is not a valid float, using default %f", env_key, val, default)
+        return default
 
 # ---------------- 기본 경로 / 타깃 설정 ----------------
 _REPO_ROOT = Path(__file__).resolve().parent
@@ -121,8 +142,8 @@ JENKINS_SERVER_DOC_EXTS = [
 ]
 
 # ---------------- UDS / Source Parsing 성능 설정 ----------------
-UDS_MAX_SOURCE_FILES = int(os.environ.get("DEVOPS_UDS_MAX_FILES", "1200"))
-UDS_MAX_FUNCTION_ITEMS = int(os.environ.get("DEVOPS_UDS_MAX_ITEMS", "120"))
+UDS_MAX_SOURCE_FILES = _safe_int("DEVOPS_UDS_MAX_FILES", 1200)
+UDS_MAX_FUNCTION_ITEMS = _safe_int("DEVOPS_UDS_MAX_ITEMS", 120)
 
 # ---------------- VectorCAST TResultParser ----------------
 VCAST_TEST_ROWS_MAX_ROWS = 5000
@@ -131,18 +152,18 @@ VCAST_FAILURES_TOP_N = 50
 
 # ---------------- UDS 품질 게이트 임계값 ----------------
 UDS_QUALITY_GATE_THRESHOLDS = {
-    "called_min": float(os.environ.get("UDS_CALLED_MIN", "95.0")),
-    "calling_min": float(os.environ.get("UDS_CALLING_MIN", "95.0")),
-    "input_min": float(os.environ.get("UDS_INPUT_MIN", "90.0")),
-    "output_min": float(os.environ.get("UDS_OUTPUT_MIN", "90.0")),
-    "global_min": float(os.environ.get("UDS_GLOBAL_MIN", "40.0")),
-    "static_min": float(os.environ.get("UDS_STATIC_MIN", "20.0")),
-    "description_min": float(os.environ.get("UDS_DESCRIPTION_MIN", "90.0")),
-    "asil_min": float(os.environ.get("UDS_ASIL_MIN", "50.0")),
-    "related_min": float(os.environ.get("UDS_RELATED_MIN", "70.0")),
-    "description_trusted_min": float(os.environ.get("UDS_DESC_TRUSTED_MIN", "60.0")),
-    "asil_trusted_min": float(os.environ.get("UDS_ASIL_TRUSTED_MIN", "40.0")),
-    "related_trusted_min": float(os.environ.get("UDS_RELATED_TRUSTED_MIN", "50.0")),
+    "called_min": _safe_float("UDS_CALLED_MIN", 95.0),
+    "calling_min": _safe_float("UDS_CALLING_MIN", 95.0),
+    "input_min": _safe_float("UDS_INPUT_MIN", 90.0),
+    "output_min": _safe_float("UDS_OUTPUT_MIN", 90.0),
+    "global_min": _safe_float("UDS_GLOBAL_MIN", 40.0),
+    "static_min": _safe_float("UDS_STATIC_MIN", 20.0),
+    "description_min": _safe_float("UDS_DESCRIPTION_MIN", 90.0),
+    "asil_min": _safe_float("UDS_ASIL_MIN", 50.0),
+    "related_min": _safe_float("UDS_RELATED_MIN", 70.0),
+    "description_trusted_min": _safe_float("UDS_DESC_TRUSTED_MIN", 60.0),
+    "asil_trusted_min": _safe_float("UDS_ASIL_TRUSTED_MIN", 40.0),
+    "related_trusted_min": _safe_float("UDS_RELATED_TRUSTED_MIN", 50.0),
 }
 
 UDS_QUALITY_WARNING_THRESHOLDS = {
@@ -162,16 +183,16 @@ UDS_QUALITY_WARNING_THRESHOLDS = {
 
 # ---------------- UDS DOCX retry 타임아웃 (초) ----------------
 UDS_DOCX_RETRY_STAGES = [
-    ("full", 0, int(os.environ.get("UDS_DOCX_FULL_TIMEOUT", "2400"))),
-    ("degraded_ai_off", 1, int(os.environ.get("UDS_DOCX_DEGRADED_TIMEOUT", "1800"))),
-    ("degraded_light", 2, int(os.environ.get("UDS_DOCX_LIGHT_TIMEOUT", "900"))),
+    ("full", 0, _safe_int("UDS_DOCX_FULL_TIMEOUT", 2400)),
+    ("degraded_ai_off", 1, _safe_int("UDS_DOCX_DEGRADED_TIMEOUT", 1800)),
+    ("degraded_light", 2, _safe_int("UDS_DOCX_LIGHT_TIMEOUT", 900)),
 ]
 
-UDS_REPORT_TIMEOUT = int(os.environ.get("UDS_REPORT_TIMEOUT", "120"))
-UDS_ACCURACY_REPORT_TIMEOUT = int(os.environ.get("UDS_ACCURACY_TIMEOUT", "300"))
+UDS_REPORT_TIMEOUT = _safe_int("UDS_REPORT_TIMEOUT", 120)
+UDS_ACCURACY_REPORT_TIMEOUT = _safe_int("UDS_ACCURACY_TIMEOUT", 300)
 
 # Source sections cache TTL (seconds)
-UDS_SOURCE_SECTIONS_CACHE_TTL = int(os.environ.get("UDS_SOURCE_CACHE_TTL", "1800"))
+UDS_SOURCE_SECTIONS_CACHE_TTL = _safe_int("UDS_SOURCE_CACHE_TTL", 1800)
 
 # ---------------- 커버리지/테스트 임계치 설정 ----------------
 DEFAULT_COVERAGE_THRESHOLD = 0.60
@@ -180,7 +201,7 @@ DEFAULT_COVERAGE_WARN_PCT = 80
 DEFAULT_COVERAGE_FAIL_PCT = 50
 DEFAULT_TESTS_MIN_COUNT = 1
 DEFAULT_REQUIRE_TESTS_ENABLED = True
-DEFAULT_TEST_GEN_TIMEOUT_SEC = int(os.environ.get("TEST_GEN_TIMEOUT_SEC", "300"))
+DEFAULT_TEST_GEN_TIMEOUT_SEC = _safe_int("TEST_GEN_TIMEOUT_SEC", 300)
 PLAN_GEN_RETRY = 5
 PLAN_REPAIR_RETRY = 5
 PLAN_MAX_FUNCTIONS = 8
@@ -222,7 +243,8 @@ def load_oai_config_list(path: str = "") -> list:
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             raw = _json.load(f)
-    except Exception:
+    except Exception as exc:
+        logging.warning("config: failed to load OAI config from %s: %s", cfg_path, exc)
         return []
     return resolve_oai_api_keys(raw if isinstance(raw, list) else [])
 DEFAULT_LLM_TEMPERATURE = 0.3
@@ -499,7 +521,7 @@ JENKINS_HIDE_CREDENTIALS = os.environ.get("DEVOPS_JENKINS_HIDE_CREDENTIALS", "1"
 JENKINS_VERIFY_TLS = os.environ.get("DEVOPS_JENKINS_VERIFY_TLS", "1") == "1"
 
 # Jenkins Viewer runtime log scan limit (summary heuristics)
-JENKINS_RUNTIME_LOG_SCAN_LIMIT = int(os.environ.get("DEVOPS_JENKINS_LOG_SCAN_LIMIT", "6") or "6")
+JENKINS_RUNTIME_LOG_SCAN_LIMIT = _safe_int("DEVOPS_JENKINS_LOG_SCAN_LIMIT", 6)
 
 # ------------------------------------------------------------
 # Rule catalog (MISRA/QAC 등) - Jenkins Viewer에서 Rule 설명 표시용

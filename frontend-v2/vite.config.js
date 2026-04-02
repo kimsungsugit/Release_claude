@@ -8,6 +8,12 @@ export default defineConfig({
     outDir: 'dist',
     sourcemap: false,
   },
+  test: {
+    environment: 'happy-dom',
+    setupFiles: ['./vitest.setup.js'],
+    globals: true,
+    css: true,
+  },
   server: {
     port: 5174,
     proxy: {

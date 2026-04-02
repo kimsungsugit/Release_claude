@@ -29,6 +29,8 @@ repo_root = Path(__file__).resolve().parents[2]
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
 
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
+
 @router.post("/api/vcast/parse")
 async def vcast_parse(
     file: UploadFile = File(...),
@@ -59,8 +61,13 @@ async def vcast_parse(
         
         # 임시 파일에 저장
         import tempfile
+        content = await file.read()
+        if len(content) > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"파일 크기 초과: {len(content)} > {MAX_UPLOAD_SIZE} bytes",
+            )
         with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
-            content = await file.read()
             tmp_file.write(content)
             tmp_path = Path(tmp_file.name)
         

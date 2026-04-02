@@ -12,13 +12,43 @@ from backend.services.files import list_report_files
 
 try:
     from bs4 import BeautifulSoup
-except Exception:  # pragma: no cover - optional dependency
-    BeautifulSoup = None  # type: ignore
+except ImportError:
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4", "-q"])
+    from bs4 import BeautifulSoup
 
 try:
     import pandas as pd
 except Exception:  # pragma: no cover - optional dependency
     pd = None  # type: ignore
+
+
+def read_text_safe(path: Path, max_bytes: int = 10 * 1024 * 1024) -> str:
+    """Read text file with size limit, supporting large files up to 10MB default."""
+    if not path.exists():
+        return ""
+    size = path.stat().st_size
+    if size > max_bytes:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            return f.read(max_bytes)
+    return path.read_text(encoding='utf-8', errors='ignore')
+
+
+def retry_parse(max_retries: int = 2):
+    """Decorator that retries parsing on failure."""
+    def decorator(func):
+        from functools import wraps
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_error = None
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_error = e
+            return {"error": str(last_error)}
+        return wrapper
+    return decorator
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -61,9 +91,8 @@ def parse_html_report(path: Path) -> Dict[str, Any]:
     if not path.exists():
         summary["error"] = "missing_file"
         return summary
-    try:
-        raw = path.read_text(encoding="utf-8", errors="ignore")
-    except Exception:
+    raw = read_text_safe(path)
+    if not raw:
         summary["error"] = "read_failed"
         return summary
     if not BeautifulSoup:
@@ -73,13 +102,13 @@ def parse_html_report(path: Path) -> Dict[str, Any]:
     title = soup.title.string if soup.title else ""
     summary["title"] = _clean_text(title) or None
     headings = []
-    for node in soup.find_all(["h1", "h2"], limit=6):
+    for node in soup.find_all(["h1", "h2"], limit=20):
         txt = _clean_text(node.get_text(" ", strip=True))
         if txt:
             headings.append(txt)
     summary["headings"] = headings
     tables: List[Dict[str, str]] = []
-    for table in soup.find_all("table")[:3]:
+    for table in soup.find_all("table")[:10]:
         rows: Dict[str, str] = {}
         for tr in table.find_all("tr"):
             cells = [c.get_text(" ", strip=True) for c in tr.find_all(["th", "td"])]
@@ -88,7 +117,7 @@ def parse_html_report(path: Path) -> Dict[str, Any]:
                 val = _clean_text(cells[1])
                 if key and key not in rows:
                     rows[key] = val
-            if len(rows) >= 12:
+            if len(rows) >= 50:
                 break
         if rows:
             tables.append(rows)

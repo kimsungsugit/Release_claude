@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     from bs4 import BeautifulSoup
 except ImportError:
-    BeautifulSoup = None
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4", "-q"])
+    from bs4 import BeautifulSoup
 
 
 class VCASTVersion(Enum):
@@ -160,6 +162,7 @@ class MetricsBank:
     statement_data: Dict[str, MatixDataBank] = field(default_factory=dict)  # Unit Test
     functions_data: Dict[str, MatixDataBank] = field(default_factory=dict)  # Integration Test
     sub_functions: Dict[str, List[SubFunctionExecution]] = field(default_factory=dict)  # AggregateCoverage
+    parse_error: str = ""
 
 
 @dataclass
@@ -205,6 +208,7 @@ class TCBank:
     max_input_count: int = 0
     max_exp_result_count: int = 0
     max_act_result_count: int = 0
+    parse_error: str = ""
 
     @property
     def test_count(self) -> int:
@@ -325,6 +329,19 @@ class VectorCASTParser:
         self.version = version
         self.lines: List[str] = []
 
+    def _detect_version(self) -> None:
+        """Scan the first 500 lines to auto-detect VectorCAST version."""
+        scan_lines = self.lines[:500]
+        scan_text = "".join(scan_lines)
+        line_count = len(self.lines)
+
+        if "VectorCAST 2025" in scan_text or line_count > 350:
+            self.version = VCASTVersion.Ver2025
+        elif "VectorCAST 2024" in scan_text or 200 <= line_count <= 350:
+            self.version = VCASTVersion.Ver2024
+        elif "VectorCAST 2021" in scan_text or line_count < 200:
+            self.version = VCASTVersion.Ver2021
+
     def parse_testcase_data(self, filepath: Path) -> TCBank:
         """TestCaseData 리포트 파싱"""
         if not filepath.exists():
@@ -333,22 +350,24 @@ class VectorCASTParser:
         # 파일을 라인별로 읽기
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             self.lines = f.readlines()
-        
+
+        # Auto-detect version from file contents
+        self._detect_version()
+
         tcbank = TCBank()
         tcbank.unit_mode = False  # 기본값
-        
+
         # 파일 타입 확인
         if len(self.lines) < 5:
             raise ValueError("Invalid file format")
-        
+
         title_line = self.lines[4] if len(self.lines) > 4 else ""
         if "Test Case Data Report" not in title_line:
             raise ValueError("Not a Test Case Data Report")
-        
-        # Contents Block 찾기
+
+        # Contents Block 찾기 (with dynamic search fallback)
         contents_line_no = self.LINENO_CONTENTS_BLOCK.get(self.version, 401)
-        if contents_line_no >= len(self.lines):
-            # 라인 번호가 맞지 않으면 검색
+        if contents_line_no >= len(self.lines) or "contents-block" not in self.lines[min(contents_line_no, len(self.lines)-1)]:
             for i, line in enumerate(self.lines):
                 if "contents-block" in line:
                     contents_line_no = i
@@ -1161,14 +1180,20 @@ class VectorCASTParser:
 def parse_vcast_report(filepath: Path, report_type: ReportType, version: VCASTVersion = VCASTVersion.Ver2025) -> Any:
     """VectorCAST 리포트 파싱 메인 함수"""
     parser = VectorCASTParser(version=version)
-    
-    if report_type == ReportType.TestCaseData:
-        return parser.parse_testcase_data(filepath)
-    elif report_type == ReportType.ExecutionResult:
-        return parser.parse_execution_result(filepath)
-    elif report_type == ReportType.Metrics:
-        return parser.parse_metrics(filepath)
-    elif report_type == ReportType.AggregateCoverage:
-        return parser.parse_aggregate_coverage(filepath)
-    else:
-        raise ValueError(f"Unsupported report type: {report_type}")
+    try:
+        if report_type == ReportType.TestCaseData:
+            return parser.parse_testcase_data(filepath)
+        elif report_type == ReportType.ExecutionResult:
+            return parser.parse_execution_result(filepath)
+        elif report_type == ReportType.Metrics:
+            return parser.parse_metrics(filepath)
+        elif report_type == ReportType.AggregateCoverage:
+            return parser.parse_aggregate_coverage(filepath)
+        else:
+            bank = TCBank()
+            bank.parse_error = f"Unsupported report type: {report_type}"
+            return bank
+    except Exception as e:
+        bank = TCBank() if report_type in (ReportType.TestCaseData, ReportType.ExecutionResult) else MetricsBank()
+        bank.parse_error = str(e)
+        return bank

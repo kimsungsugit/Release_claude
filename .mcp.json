@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "devops-release": {
+      "command": "C:/Users/kss11/AppData/Local/Programs/Python/Python312/python.exe",
+      "args": ["-m", "backend.mcp.stdio_server"],
+      "cwd": ".",
+      "env": {
+        "PYTHONPATH": "."
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"]
+    }
+  }
+}

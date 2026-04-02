@@ -16,6 +16,8 @@ try:
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.comments import Comment
     from openpyxl.utils import get_column_letter
+    from openpyxl.chart import BarChart, Reference
+    from openpyxl.chart.series import DataPoint
 except ImportError:
     Workbook = None
     Font = None
@@ -25,6 +27,9 @@ except ImportError:
     Side = None
     Comment = None
     get_column_letter = None
+    BarChart = None
+    Reference = None
+    DataPoint = None
 
 from backend.services.vcast_parser import (
     TCBank, TestCaseItem, TestResultItem,
@@ -795,3 +800,158 @@ def _generate_it_metrics_sheet(
     for i, w in enumerate(it_widths):
         if col_offset + i <= col_offset + col_count - 1:
             excel.set_column_width(col_offset + i, w)
+
+
+def add_coverage_charts(wb, metrics_bank: MetricsBank) -> None:
+    """Coverage Summary 시트에 커버리지 차트를 생성합니다.
+
+    Args:
+        wb: openpyxl Workbook 인스턴스
+        metrics_bank: 파싱된 Metrics 데이터
+    """
+    if BarChart is None:
+        return
+
+    statement_data = metrics_bank.statement_data
+    if not statement_data:
+        return
+
+    ws = wb.create_sheet("Coverage Summary")
+    ws.sheet_view.showGridLines = False
+
+    # ------------------------------------------------------------------
+    # 1. 타이틀
+    # ------------------------------------------------------------------
+    ws.merge_cells("A1:J1")
+    title_cell = ws["A1"]
+    title_cell.value = "Coverage Summary"
+    title_cell.font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+    title_cell.fill = PatternFill(start_color="203764", end_color="203764", fill_type="solid")
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # ------------------------------------------------------------------
+    # 2. 데이터 테이블: 함수별 Statement% / Branch% 커버리지
+    # ------------------------------------------------------------------
+    data_start_row = 4
+    ws.cell(row=data_start_row, column=1, value="Function")
+    ws.cell(row=data_start_row, column=2, value="Statement %")
+    ws.cell(row=data_start_row, column=3, value="Branch %")
+    ws.cell(row=data_start_row, column=4, value="Stmt Covered")
+    ws.cell(row=data_start_row, column=5, value="Stmt Uncovered")
+    for c in range(1, 6):
+        ws.cell(row=data_start_row, column=c).font = Font(bold=True)
+
+    # 요약 카운터
+    total_stmt_count = 0
+    total_stmt_total = 0
+    total_branch_count = 0
+    total_branch_total = 0
+
+    data_row = data_start_row + 1
+    for unit_name, bank in sorted(statement_data.items()):
+        for subprogram, item in sorted(bank.dic_data.items()):
+            if not isinstance(item, MatricStatementItem):
+                continue
+
+            ws.cell(row=data_row, column=1, value=item.subprogram or subprogram)
+
+            # Statement coverage percentage
+            stmt_pct = 0.0
+            stmt_covered = 0
+            stmt_uncovered = 0
+            if item.statements:
+                try:
+                    stmt_pct = float(item.statements.percentage)
+                except (ValueError, TypeError):
+                    stmt_pct = 0.0
+                stmt_covered = item.statements.count
+                stmt_uncovered = item.statements.total - item.statements.count
+                total_stmt_count += item.statements.count
+                total_stmt_total += item.statements.total
+
+            # Branch coverage percentage
+            branch_pct = 0.0
+            if item.branches:
+                try:
+                    branch_pct = float(item.branches.percentage)
+                except (ValueError, TypeError):
+                    branch_pct = 0.0
+                total_branch_count += item.branches.count
+                total_branch_total += item.branches.total
+
+            ws.cell(row=data_row, column=2, value=stmt_pct)
+            ws.cell(row=data_row, column=3, value=branch_pct)
+            ws.cell(row=data_row, column=4, value=stmt_covered)
+            ws.cell(row=data_row, column=5, value=stmt_uncovered)
+            data_row += 1
+
+    data_end_row = data_row - 1
+
+    if data_end_row < data_start_row + 1:
+        # 데이터가 없으면 차트를 생성하지 않음
+        return
+
+    # 요약 통계
+    ws.cell(row=3, column=7, value="Total Statements").font = Font(bold=True)
+    ws.cell(row=3, column=8, value=total_stmt_total)
+    ws.cell(row=3, column=9, value="Covered").font = Font(bold=True)
+    ws.cell(row=3, column=10, value=total_stmt_count)
+
+    # ------------------------------------------------------------------
+    # 3. Bar Chart: Statement% / Branch% per function
+    # ------------------------------------------------------------------
+    bar_chart = BarChart()
+    bar_chart.type = "col"
+    bar_chart.style = 10
+    bar_chart.title = "Statement / Branch Coverage (%)"
+    bar_chart.y_axis.title = "Coverage %"
+    bar_chart.x_axis.title = "Function"
+    bar_chart.y_axis.scaling.max = 100
+    bar_chart.width = 30
+    bar_chart.height = 15
+
+    cats = Reference(ws, min_col=1, min_row=data_start_row + 1, max_row=data_end_row)
+    stmt_vals = Reference(ws, min_col=2, min_row=data_start_row, max_row=data_end_row)
+    branch_vals = Reference(ws, min_col=3, min_row=data_start_row, max_row=data_end_row)
+
+    bar_chart.add_data(stmt_vals, titles_from_data=True)
+    bar_chart.add_data(branch_vals, titles_from_data=True)
+    bar_chart.set_categories(cats)
+
+    # 계열 색상 설정
+    bar_chart.series[0].graphicalProperties.solidFill = "4472C4"  # 파랑: Statement
+    bar_chart.series[1].graphicalProperties.solidFill = "ED7D31"  # 주황: Branch
+
+    ws.add_chart(bar_chart, "A" + str(data_end_row + 3))
+
+    # ------------------------------------------------------------------
+    # 4. Stacked Bar Chart: Covered vs Uncovered statements per function
+    # ------------------------------------------------------------------
+    stacked_chart = BarChart()
+    stacked_chart.type = "col"
+    stacked_chart.grouping = "stacked"
+    stacked_chart.style = 10
+    stacked_chart.title = "Covered vs Uncovered Statements"
+    stacked_chart.y_axis.title = "Statements"
+    stacked_chart.x_axis.title = "Function"
+    stacked_chart.width = 30
+    stacked_chart.height = 15
+
+    cats2 = Reference(ws, min_col=1, min_row=data_start_row + 1, max_row=data_end_row)
+    covered_vals = Reference(ws, min_col=4, min_row=data_start_row, max_row=data_end_row)
+    uncovered_vals = Reference(ws, min_col=5, min_row=data_start_row, max_row=data_end_row)
+
+    stacked_chart.add_data(covered_vals, titles_from_data=True)
+    stacked_chart.add_data(uncovered_vals, titles_from_data=True)
+    stacked_chart.set_categories(cats2)
+
+    # 계열 색상: 초록(covered), 빨강(uncovered)
+    stacked_chart.series[0].graphicalProperties.solidFill = "00B050"
+    stacked_chart.series[1].graphicalProperties.solidFill = "FF4444"
+
+    ws.add_chart(stacked_chart, "A" + str(data_end_row + 20))
+
+    # 열 너비 조정
+    ws.column_dimensions["A"].width = 30
+    for col_letter in ["B", "C", "D", "E"]:
+        ws.column_dimensions[col_letter].width = 16

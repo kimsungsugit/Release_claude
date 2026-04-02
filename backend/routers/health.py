@@ -1,13 +1,38 @@
 # /app/backend/routers/health.py
-"""Health-check endpoint."""
+"""Health-check and monitoring endpoints."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 import config
+from backend.error_handler import APIError
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+
+class FileModeRequest(BaseModel):
+    mode: str = "local"
+    base_url: Optional[str] = None
+    source_root: Optional[str] = None
+
+
+class PreviewExcelRequest(BaseModel):
+    path: str
+    page: int = 0
+    page_size: int = 100
+
+
+class CheckAccessRequest(BaseModel):
+    path: str = ""
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -31,22 +56,21 @@ async def get_file_mode():
 
 
 @router.post("/file-mode")
-async def set_file_mode(body: dict):
+async def set_file_mode(body: FileModeRequest):
     from backend.services.file_resolver import switch_mode
-    mode = body.get("mode", "local")
-    kwargs = {k: v for k, v in body.items() if k != "mode"}
-    resolver = switch_mode(mode, **kwargs)
+    kwargs = body.model_dump(exclude={"mode"}, exclude_none=True)
+    resolver = switch_mode(body.mode, **kwargs)
     return {"ok": True, **resolver.get_config()}
 
 
 @router.post("/preview-excel")
-async def preview_excel_file(body: dict):
+async def preview_excel_file(body: PreviewExcelRequest):
     """범용 문서 미리보기 — 로컬 경로에서 시트별 데이터 반환"""
-    file_path = str(body.get("path", "")).strip()
-    page = int(body.get("page", 0))  # 0-based page
-    page_size = int(body.get("page_size", 100))
+    file_path = body.path.strip()
+    page = body.page
+    page_size = body.page_size
     if not file_path:
-        raise HTTPException(status_code=400, detail="path required")
+        raise APIError(status_code=400, message="path required", code="MISSING_PATH")
     p = Path(file_path).expanduser().resolve()
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"파일 없음: {file_path}")
@@ -310,11 +334,11 @@ async def preview_image(path: str, image_id: str):
 
 
 @router.post("/file-mode/check-access")
-async def check_cloudium_access(body: dict = {}):
+async def check_cloudium_access(body: CheckAccessRequest = CheckAccessRequest()):
     """경로 접근 가능 여부 확인."""
     from backend.services.file_resolver import get_resolver
     resolver = get_resolver()
-    test_path = body.get("path", "")
+    test_path = body.path
     if test_path:
         try:
             resolver._check_allowed(test_path) if hasattr(resolver, '_check_allowed') else None
@@ -323,3 +347,41 @@ async def check_cloudium_access(body: dict = {}):
         except PermissionError as e:
             return {"ok": False, "accessible": False, "error": str(e), "mode": resolver.mode}
     return {"ok": True, "mode": resolver.mode, **resolver.get_config()}
+
+
+@router.get("/metrics")
+async def metrics():
+    """Detailed system metrics for monitoring."""
+    if psutil is None:
+        return {
+            "cpu_percent": None,
+            "memory": {"total_mb": None, "used_percent": None},
+            "disk": {"free_gb": None},
+            "process": {"pid": os.getpid(), "threads": None},
+            "note": "psutil not installed — install for full metrics",
+        }
+    return {
+        "cpu_percent": psutil.cpu_percent(interval=0.1),
+        "memory": {
+            "total_mb": psutil.virtual_memory().total // (1024 * 1024),
+            "used_percent": psutil.virtual_memory().percent,
+        },
+        "disk": {
+            "free_gb": psutil.disk_usage("/").free // (1024**3),
+        },
+        "process": {
+            "pid": os.getpid(),
+            "threads": len(psutil.Process(os.getpid()).threads()),
+        },
+    }
+
+
+@router.post("/cache/clear")
+async def clear_cache():
+    """Clear all in-memory caches."""
+    from backend import state
+    state.jenkins_progress.clear()
+    state.uds_view_cache.clear()
+    state.source_sections_cache.clear()
+    state.session_list_cache.clear()
+    return {"ok": True, "message": "All caches cleared"}

@@ -13,8 +13,22 @@ from backend.services.vcast_excel_generator import XlsxManager, XlsCellStyle
 
 try:
     from openpyxl import Workbook
+    from openpyxl.chart import BarChart, PieChart, Reference
+    from openpyxl.chart.series import DataPoint
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
 except ImportError:
     Workbook = None
+    BarChart = None
+    PieChart = None
+    Reference = None
+    DataPoint = None
+    Font = None
+    PatternFill = None
+    Alignment = None
+    Border = None
+    Side = None
+    get_column_letter = None
 
 
 def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
@@ -190,4 +204,143 @@ def generate_qac_excel(qac_manager: QACDataManager, output_path: Path) -> bool:
         if col - col_offset < len(widths):
             excel.set_column_width(col, widths[col - col_offset])
     
+    # Summary 차트 시트 추가
+    add_summary_charts(excel.workbook, qac_manager)
+
     return excel.close(True)
+
+
+def add_summary_charts(wb, manager: QACDataManager) -> None:
+    """QAC Summary 시트에 차트를 생성합니다.
+
+    Args:
+        wb: openpyxl Workbook 인스턴스
+        manager: 파싱된 QAC 데이터 매니저
+    """
+    if BarChart is None or not manager.list_result:
+        return
+
+    ws = wb.create_sheet("Summary")
+    ws.sheet_view.showGridLines = False
+
+    # ------------------------------------------------------------------
+    # 1. 타이틀 & 요약 통계
+    # ------------------------------------------------------------------
+    ws.merge_cells("A1:H1")
+    title_cell = ws["A1"]
+    title_cell.value = "QAC Summary"
+    title_cell.font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+    title_cell.fill = PatternFill(start_color="203764", end_color="203764", fill_type="solid")
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws["A3"] = "Total functions"
+    ws["B3"] = len(manager.list_result)
+    ws["A3"].font = Font(bold=True)
+
+    # ------------------------------------------------------------------
+    # 2. v(G) 복잡도 분포 데이터 테이블 (bar chart 원본)
+    #    각 함수에 대해 warning level 0/1/2/3 중 하나를 매김
+    # ------------------------------------------------------------------
+    bar_data_start_row = 6
+    ws.cell(row=bar_data_start_row, column=1, value="Function")
+    ws.cell(row=bar_data_start_row, column=2, value="v(G)")
+    ws.cell(row=bar_data_start_row, column=3, value="Warning Level")
+    for c in range(1, 4):
+        ws.cell(row=bar_data_start_row, column=c).font = Font(bold=True)
+
+    data_row = bar_data_start_row + 1
+    for his_item in manager.list_result:
+        vg_value = his_item.get_matrix_value(MatrixItem.V_G)
+        warn_level = manager.check_warning_level(MatrixItem.V_G, vg_value)
+
+        ws.cell(row=data_row, column=1, value=his_item.function_name)
+
+        # v(G) 값을 숫자로 기록 (차트에서 사용)
+        try:
+            ws.cell(row=data_row, column=2, value=int(vg_value))
+        except (ValueError, TypeError):
+            ws.cell(row=data_row, column=2, value=0)
+
+        ws.cell(row=data_row, column=3, value=warn_level)
+        data_row += 1
+
+    bar_data_end_row = data_row - 1
+
+    # --- Bar Chart: v(G) complexity per function ---
+    bar_chart = BarChart()
+    bar_chart.type = "col"
+    bar_chart.style = 10
+    bar_chart.title = "v(G) Complexity Distribution"
+    bar_chart.y_axis.title = "Cyclomatic Complexity"
+    bar_chart.x_axis.title = "Function"
+
+    cats = Reference(ws, min_col=1, min_row=bar_data_start_row + 1, max_row=bar_data_end_row)
+    vals = Reference(ws, min_col=2, min_row=bar_data_start_row, max_row=bar_data_end_row)
+    bar_chart.add_data(vals, titles_from_data=True)
+    bar_chart.set_categories(cats)
+    bar_chart.shape = 4
+    bar_chart.width = 30
+    bar_chart.height = 15
+
+    # 색상 매핑: warning level -> fill colour
+    level_colors = {0: "00B050", 1: "FFFF00", 2: "FFA500", 3: "FF0000"}
+    series = bar_chart.series[0]
+    for idx in range(bar_data_end_row - bar_data_start_row):
+        level_val = ws.cell(row=bar_data_start_row + 1 + idx, column=3).value
+        color = level_colors.get(level_val, "00B050")
+        pt = DataPoint(idx=idx)
+        pt.graphicalProperties.solidFill = color
+        series.data_points.append(pt)
+
+    ws.add_chart(bar_chart, "E3")
+
+    # ------------------------------------------------------------------
+    # 3. 준수율 파이 차트 데이터 테이블
+    #    Pass (level 0) vs Yellow (1) vs Orange (2) vs Red (3)
+    # ------------------------------------------------------------------
+    pie_data_start_row = bar_data_end_row + 3
+    ws.cell(row=pie_data_start_row, column=1, value="Compliance Level")
+    ws.cell(row=pie_data_start_row, column=2, value="Count")
+    ws.cell(row=pie_data_start_row, column=1).font = Font(bold=True)
+    ws.cell(row=pie_data_start_row, column=2).font = Font(bold=True)
+
+    level_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    for his_item in manager.list_result:
+        vg_value = his_item.get_matrix_value(MatrixItem.V_G)
+        warn_level = manager.check_warning_level(MatrixItem.V_G, vg_value)
+        level_counts[warn_level] = level_counts.get(warn_level, 0) + 1
+
+    labels = {0: "Pass (Green)", 1: "Warning (Yellow)", 2: "Caution (Orange)", 3: "Fail (Red)"}
+    pie_colors = {0: "00B050", 1: "FFFF00", 2: "FFA500", 3: "FF0000"}
+    pie_row = pie_data_start_row + 1
+    for level in range(4):
+        ws.cell(row=pie_row, column=1, value=labels[level])
+        ws.cell(row=pie_row, column=2, value=level_counts[level])
+        pie_row += 1
+
+    pie_data_end_row = pie_row - 1
+
+    pie_chart = PieChart()
+    pie_chart.title = "Overall Compliance Breakdown"
+    pie_chart.style = 10
+    pie_chart.width = 18
+    pie_chart.height = 14
+
+    pie_cats = Reference(ws, min_col=1, min_row=pie_data_start_row + 1, max_row=pie_data_end_row)
+    pie_vals = Reference(ws, min_col=2, min_row=pie_data_start_row, max_row=pie_data_end_row)
+    pie_chart.add_data(pie_vals, titles_from_data=True)
+    pie_chart.set_categories(pie_cats)
+
+    # 파이 슬라이스 색상 적용
+    pie_series = pie_chart.series[0]
+    for idx, level in enumerate(range(4)):
+        pt = DataPoint(idx=idx)
+        pt.graphicalProperties.solidFill = pie_colors[level]
+        pie_series.data_points.append(pt)
+
+    ws.add_chart(pie_chart, "E" + str(pie_data_start_row))
+
+    # 열 너비 조정
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 15
+    ws.column_dimensions["C"].width = 15

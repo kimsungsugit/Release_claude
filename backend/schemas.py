@@ -75,7 +75,7 @@ class JenkinsSourceDownloadRequest(JenkinsSyncRequest):
     scm_type: str = ""
     scm_url: str = ""
     scm_username: str = ""
-    scm_password: str = ""
+    # scm_password removed for security — use DEVOPS_SCM_PASSWORD env var
     scm_branch: str = ""
     scm_revision: str = ""
 
@@ -84,7 +84,7 @@ class JenkinsScmInfoRequest(BaseModel):
     scm_type: str = "svn"
     scm_url: str
     scm_username: str = ""
-    scm_password: str = ""
+    # scm_password removed for security — use DEVOPS_SCM_PASSWORD env var
 
 
 class JenkinsImpactTriggerRequest(BaseModel):

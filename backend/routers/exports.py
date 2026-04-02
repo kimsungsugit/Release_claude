@@ -1,7 +1,9 @@
 """Auto-generated router: exports"""
 from fastapi import APIRouter, HTTPException, Request, Query
+from backend.error_handler import APIError
 from fastapi.responses import FileResponse, HTMLResponse
 from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
 import json
 import traceback
 import logging
@@ -13,6 +15,89 @@ from backend.helpers import _exports_dir, _invalidate_session_cache, _load_sessi
 
 router = APIRouter()
 _logger = logging.getLogger("devops_api")
+
+
+# ── PDF export models ──────────────────────────────────────────────
+class PdfConvertRequest(BaseModel):
+    source_path: str
+    output_path: Optional[str] = None
+    sheet_name: Optional[str] = None
+
+
+class PdfSection(BaseModel):
+    heading: str = ""
+    content: Any = ""
+
+
+class PdfReportRequest(BaseModel):
+    title: str
+    sections: List[PdfSection]
+    output_path: str
+    subtitle: str = ""
+
+
+# ── PDF export endpoints ───────────────────────────────────────────
+@router.post("/api/exports/pdf/convert")
+def convert_to_pdf(req: PdfConvertRequest) -> Dict[str, Any]:
+    """Convert DOCX or XLSX file to PDF.
+
+    Automatically selects converter based on file extension.
+    """
+    from backend.services.pdf_converter import docx_to_pdf, xlsx_to_pdf
+
+    source = Path(req.source_path)
+    output = Path(req.output_path) if req.output_path else None
+    ext = source.suffix.lower()
+
+    try:
+        if ext == ".docx":
+            result = docx_to_pdf(source, output)
+        elif ext in (".xlsx", ".xls"):
+            result = xlsx_to_pdf(source, output, sheet_name=req.sheet_name)
+        else:
+            raise APIError(
+                status_code=400,
+                message=f"Unsupported file type: {ext}. Use .docx or .xlsx",
+                code="UNSUPPORTED_FILE_TYPE",
+            )
+    except FileNotFoundError as exc:
+        raise APIError(status_code=404, message=str(exc), code="FILE_NOT_FOUND")
+    except RuntimeError as exc:
+        raise APIError(status_code=500, message=str(exc), code="CONVERSION_ERROR")
+    except Exception:
+        _logger.error("PDF conversion failed:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="PDF 변환 중 오류 발생")
+
+    return {
+        "ok": True,
+        "pdf_path": str(result),
+        "size_mb": round(result.stat().st_size / (1024 * 1024), 2),
+    }
+
+
+@router.post("/api/exports/pdf/report")
+def generate_pdf_report(req: PdfReportRequest) -> Dict[str, Any]:
+    """Generate a structured PDF report from provided sections."""
+    from backend.services.pdf_converter import generate_report_pdf
+
+    sections = [s.model_dump() for s in req.sections]
+
+    try:
+        result = generate_report_pdf(
+            title=req.title,
+            sections=sections,
+            pdf_path=Path(req.output_path),
+            subtitle=req.subtitle,
+        )
+    except Exception:
+        _logger.error("PDF report generation failed:\n%s", traceback.format_exc())
+        raise HTTPException(status_code=500, detail="PDF 리포트 생성 중 오류 발생")
+
+    return {
+        "ok": True,
+        "pdf_path": str(result),
+        "size_mb": round(result.stat().st_size / (1024 * 1024), 2),
+    }
 
 @router.get("/api/exports")
 def list_exports(

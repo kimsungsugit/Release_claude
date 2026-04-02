@@ -27,10 +27,31 @@ repo_root = Path(__file__).resolve().parents[1]
 if str(repo_root) not in sys.path:
     sys.path.insert(0, str(repo_root))
 
+import os
+
+
+class JSONFormatter(logging.Formatter):
+    """Structured JSON log formatter — activate via LOG_FORMAT=json env var."""
+
+    def format(self, record):
+        log_data = {
+            "timestamp": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[0]:
+            log_data["exception"] = self.formatException(record.exc_info)
+        return json.dumps(log_data, ensure_ascii=False)
+
+
 _api_logger = logging.getLogger("devops_api")
 if not _api_logger.handlers:
     _h = logging.StreamHandler()
-    _h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"))
+    if os.environ.get("LOG_FORMAT", "").lower() == "json":
+        _h.setFormatter(JSONFormatter())
+    else:
+        _h.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s", datefmt="%H:%M:%S"))
     _api_logger.addHandler(_h)
     _api_logger.setLevel(logging.INFO)
 
@@ -45,6 +66,13 @@ async def _startup():
         ip = socket.gethostbyname(hostname)
     except Exception:
         ip = "127.0.0.1"
+    # Initialize Quality DB
+    try:
+        from workflow.quality.db import init_db as _init_quality_db
+        _init_quality_db()
+    except Exception as _qe:
+        _api_logger.warning("Quality DB init skipped: %s", _qe)
+
     _api_logger.info("=" * 50)
     _api_logger.info("DevOps Release Server started")
     _api_logger.info("  Local:   http://127.0.0.1:8000")
@@ -66,6 +94,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+from backend.middleware import RateLimitMiddleware, RequestLoggingMiddleware, SecurityHeadersMiddleware  # noqa: E402
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 from backend.user_context import UserContextMiddleware  # noqa: E402
 app.add_middleware(UserContextMiddleware)
@@ -90,6 +123,11 @@ async def _http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         media_type="application/json",
     )
+
+# Standardized error handlers (layered on top of legacy handlers above)
+from backend.error_handler import global_exception_handler, http_exception_handler  # noqa: E402
+app.add_exception_handler(Exception, global_exception_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +164,8 @@ from backend.routers.sessions import router as _sessions_router  # noqa: E402
 app.include_router(_sessions_router)
 from backend.routers.scm import router as _scm_router  # noqa: E402
 app.include_router(_scm_router)
+from backend.routers.quality import router as _quality_router  # noqa: E402
+app.include_router(_quality_router)
 
 # ---------------------------------------------------------------------------
 # Serve frontend-v2 production build (static files + SPA fallback)

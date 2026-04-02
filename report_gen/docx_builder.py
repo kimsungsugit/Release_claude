@@ -233,7 +233,7 @@ def _render_logic_flow_diagram(
     DIAMOND_H = 90
     GAP_Y = 20
     BRANCH_GAP_X = 80
-    MAX_VISIBLE_NODES = 30
+    MAX_VISIBLE_NODES = 80
 
     canvas_items: List[Dict[str, Any]] = []
     _uid = [0]
@@ -451,6 +451,11 @@ def _render_logic_flow_diagram(
     _add("ellipse", cx - 120, end_y, 240, 36,
          text="End", fill=COLORS["end"], outline="#1565C0")
     total_h = end_y + 36 + 30
+
+    # --- Pagination note: if total_h > 2000, diagram spans multiple pages ---
+    # The full image is still created as a single file; the DOCX renderer
+    # will scale it to fit page width, causing it to span across pages
+    # automatically when the image is tall enough.
 
     # --- Render ---
     img = Image.new("RGB", (W, max(400, total_h)), COLORS["bg"])
@@ -988,8 +993,8 @@ def _render_unit_structure_image(
         _logger.warning("PIL not available, skipping structure image for %s", module_label)
         return None
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    width = 1300
-    height = 760
+    width = 1600
+    height = 1000
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
     try:

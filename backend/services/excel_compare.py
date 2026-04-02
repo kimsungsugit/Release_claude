@@ -74,8 +74,15 @@ def read_excel_sheet(filepath: Path, sheet_index: int) -> Optional[List[List[str
         sheet = wb[sheet_names[sheet_index - 1]]
         data = []
         
-        for row in sheet.iter_rows(values_only=True):
-            row_data = [str(cell) if cell is not None else "" for cell in row]
+        for row in sheet.iter_rows(values_only=False):
+            row_data = []
+            for cell in row:
+                if cell.value is not None:
+                    row_data.append(str(cell.value))
+                elif cell.data_type == 'f':
+                    row_data.append(f"(formula)")  # Formula without cached value
+                else:
+                    row_data.append("")
             data.append(row_data)
         
         wb.close()

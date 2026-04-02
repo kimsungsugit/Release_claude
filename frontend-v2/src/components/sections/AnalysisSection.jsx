@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { post } from '../../api.js';
 import { useJenkinsCfg, useToast } from '../../App.jsx';
 import StatusBadge from '../StatusBadge.jsx';
@@ -11,16 +11,14 @@ export default function AnalysisSection({ job, analysisResult }) {
 
   const [complexity, setComplexity] = useState(null);
   const [complexityLoading, setComplexityLoading] = useState(false);
-  const [docs, setDocs] = useState(null);
-  const [docsLoading, setDocsLoading] = useState(false);
+  const [compSort, setCompSort] = useState('complexity');
+  const [compFilter, setCompFilter] = useState('');
 
   const loadComplexity = useCallback(async () => {
     setComplexityLoading(true);
     try {
       const data = await post('/api/jenkins/report/complexity', {
-        job_url: job.url,
-        cache_root: cacheRoot,
-        build_selector: cfg.buildSelector,
+        job_url: job.url, cache_root: cacheRoot, build_selector: cfg.buildSelector,
       });
       setComplexity(data);
     } catch (e) {
@@ -30,349 +28,278 @@ export default function AnalysisSection({ job, analysisResult }) {
     }
   }, [job, cfg, cacheRoot, toast]);
 
-  const loadDocs = useCallback(async () => {
-    setDocsLoading(true);
-    try {
-      const data = await post('/api/jenkins/report/docs', {
-        job_url: job.url,
-        cache_root: cacheRoot,
-        build_selector: cfg.buildSelector,
-      });
-      setDocs(data);
-    } catch (e) {
-      toast('error', `문서 목록 조회 실패: ${e.message}`);
-    } finally {
-      setDocsLoading(false);
-    }
-  }, [job, cfg, cacheRoot, toast]);
-
   const rd = analysisResult?.reportData;
-  const rows = complexity?.rows ?? complexity?.functions ?? [];
+  const kpis = rd?.kpis || {};
+  const cov = kpis.coverage || {};
+  const prqa = kpis.prqa || {};
+  const hmr = prqa.hmr_stats || {};
+  const cm = kpis.code_metrics || {};
+  const vc = kpis.vectorcast || {};
+  const tester = rd?.tester || {};
+  const utCov = vc.ut || {};
+  const itCov = vc.it || {};
+  const modules = utCov.modules || [];
   const qualityCfg = (() => {
     try { return JSON.parse(localStorage.getItem('devops_v2_quality') || '{}'); } catch (_) { return {}; }
   })();
   const threshold = qualityCfg.complexity ?? 15;
 
-  // coverage may be a number (%) or an object {line_rate, branch_rate, ok, threshold}
-  const coverageObj = (() => {
-    const c = rd?.coverage;
-    if (c == null) return null;
-    if (typeof c === 'number') return { pct: c, line_rate: null, branch_rate: null, ok: null, threshold: null };
-    if (typeof c === 'object') {
-      const pct = c.line_rate != null ? Math.round(c.line_rate * 100) : null;
-      return { pct, line_rate: c.line_rate, branch_rate: c.branch_rate, ok: c.ok, threshold: c.threshold };
+  // Coverage as number
+  const covPct = typeof rd?.coverage === 'number' ? rd.coverage
+    : (cov.line_rate != null ? Math.round(cov.line_rate * 100) : null);
+  const brPct = cov.branch_rate != null ? Math.round(cov.branch_rate * 100) : null;
+
+  // Complexity table
+  const rows = complexity?.rows ?? complexity?.functions ?? [];
+  const filteredRows = useMemo(() => {
+    let items = [...rows];
+    if (compFilter.trim()) {
+      const q = compFilter.trim().toLowerCase();
+      items = items.filter(r => (r.function ?? r.name ?? '').toLowerCase().includes(q) || (r.file ?? r.path ?? '').toLowerCase().includes(q));
     }
-    return null;
-  })();
-  const coveragePct = coverageObj?.pct;
-
-  const prqa = rd?.kpis?.prqa;
-  const codeMetrics = rd?.kpis?.code_metrics;
-  const tester = rd?.tester;
-  const hmr = prqa?.hmr_stats;
-
-  // Normalize docs into an array of items for display
-  const docItems = (() => {
-    if (!docs) return null;
-    if (Array.isArray(docs)) return docs;
-    if (docs.documents) return Array.isArray(docs.documents) ? docs.documents : [];
-    if (docs.files) return Array.isArray(docs.files) ? docs.files : [];
-    if (docs.items) return Array.isArray(docs.items) ? docs.items : [];
-    return null; // fallback to raw display
-  })();
+    items.sort((a, b) => {
+      if (compSort === 'complexity') return (b.complexity ?? b.cc ?? 0) - (a.complexity ?? a.cc ?? 0);
+      if (compSort === 'name') return (a.function ?? a.name ?? '').localeCompare(b.function ?? b.name ?? '');
+      return 0;
+    });
+    return items;
+  }, [rows, compFilter, compSort]);
 
   return (
     <div>
-      {/* Summary stats from report */}
-      {rd && (
+      {/* ── Coverage Detail ── */}
+      <div className="panel" style={{ marginBottom: 12 }}>
+        <div className="panel-header"><span className="panel-title">코드 커버리지</span></div>
         <div className="stats-row">
-          {coveragePct != null && (
+          {covPct != null && (
+            <div className="stat-card" style={{ borderLeft: `3px solid ${covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+              <div className="stat-value" style={{ color: covPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{covPct}%</div>
+              <div className="stat-label">Line Coverage</div>
+            </div>
+          )}
+          {brPct != null && (
+            <div className="stat-card" style={{ borderLeft: `3px solid ${brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)'}` }}>
+              <div className="stat-value" style={{ color: brPct >= 80 ? 'var(--color-success)' : 'var(--color-warning)' }}>{brPct}%</div>
+              <div className="stat-label">Branch Coverage</div>
+            </div>
+          )}
+          {utCov.line_covered != null && (
             <div className="stat-card">
-              <div className="stat-value">{coveragePct.toFixed(1)}%</div>
-              <div className="stat-label">코드 커버리지</div>
-              {coverageObj.branch_rate != null && (
-                <div className="text-muted text-sm" style={{ marginTop: 2 }}>
-                  Branch: {(coverageObj.branch_rate * 100).toFixed(1)}%
-                </div>
-              )}
-              {coverageObj.ok != null && (
-                <div style={{ marginTop: 2 }}>
-                  <StatusBadge tone={coverageObj.ok ? 'success' : 'danger'}>
-                    {coverageObj.ok ? 'PASS' : 'FAIL'}
-                  </StatusBadge>
-                </div>
-              )}
+              <div className="stat-value">{utCov.line_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.line_total?.toLocaleString()}</span></div>
+              <div className="stat-label">UT Statement</div>
             </div>
           )}
-          {rd.qac_violations != null && (
+          {utCov.branch_covered != null && (
             <div className="stat-card">
-              <div className="stat-value" style={{ color: rd.qac_violations > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{rd.qac_violations}</div>
-              <div className="stat-label">QAC 위반</div>
+              <div className="stat-value">{utCov.branch_covered?.toLocaleString()}<span style={{ fontSize: 11, fontWeight: 400 }}>/{utCov.branch_total?.toLocaleString()}</span></div>
+              <div className="stat-label">UT Branch</div>
             </div>
           )}
-          {rd.function_count != null && (
+        </div>
+
+        {/* Module coverage table */}
+        {modules.length > 0 && (
+          <details style={{ marginTop: 8 }}>
+            <summary style={{ cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>모듈별 커버리지 ({modules.length}개)</summary>
+            <div style={{ maxHeight: 250, overflowY: 'auto', marginTop: 6 }}>
+              <table className="impact-table" style={{ fontSize: 10 }}>
+                <thead><tr><th>모듈</th><th>Line Rate</th><th>Branch Rate</th><th></th></tr></thead>
+                <tbody>
+                  {[...modules].sort((a, b) => (a.line_rate ?? 100) - (b.line_rate ?? 100)).map((m, i) => (
+                    <tr key={i} style={{ background: m.line_rate < 80 ? '#fee2e2' : m.line_rate < 95 ? '#fef9c3' : undefined }}>
+                      <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{m.name}</td>
+                      <td style={{ textAlign: 'center', fontWeight: 600, color: m.line_rate < 80 ? 'var(--color-danger)' : m.line_rate < 95 ? 'var(--color-warning)' : 'var(--color-success)' }}>
+                        {m.line_rate?.toFixed(1)}%
+                      </td>
+                      <td style={{ textAlign: 'center', fontWeight: 600, color: (m.branch_rate ?? 100) < 80 ? 'var(--color-danger)' : (m.branch_rate ?? 100) < 95 ? 'var(--color-warning)' : 'var(--color-success)' }}>
+                        {m.branch_rate?.toFixed(1)}%
+                      </td>
+                      <td style={{ width: 100 }}>
+                        <div style={{ height: 6, borderRadius: 3, background: '#e5e7eb', overflow: 'hidden' }}>
+                          <div style={{ width: `${m.line_rate}%`, height: '100%', background: m.line_rate < 80 ? 'var(--color-danger)' : m.line_rate < 95 ? 'var(--color-warning)' : 'var(--color-success)' }} />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </details>
+        )}
+      </div>
+
+      {/* ── VectorCAST Detail ── */}
+      <div className="panel" style={{ marginBottom: 12 }}>
+        <div className="panel-header"><span className="panel-title">VectorCAST 테스트</span></div>
+        <div className="stats-row">
+          {tester?.vectorcast?.test_rows_count != null && (
             <div className="stat-card">
-              <div className="stat-value">{rd.function_count}</div>
-              <div className="stat-label">함수 수</div>
+              <div className="stat-value">{tester.vectorcast.test_rows_count.toLocaleString()}</div>
+              <div className="stat-label">테스트 케이스</div>
+            </div>
+          )}
+          <div className="stat-card">
+            <div className="stat-value">{(tester?.vectorcast?.ut_reports || []).length}</div>
+            <div className="stat-label">UT 리포트</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-value">{(tester?.vectorcast?.it_reports || []).length}</div>
+            <div className="stat-label">IT 리포트</div>
+          </div>
+          {tester?.vectorcast_ut_line_rate != null && (
+            <div className="stat-card">
+              <div className="stat-value" style={{ color: tester.vectorcast_ut_line_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>
+                {tester.vectorcast_ut_line_rate.toFixed(1)}%
+              </div>
+              <div className="stat-label">UT Line Rate</div>
+            </div>
+          )}
+          {tester?.vectorcast_ut_branch_rate != null && (
+            <div className="stat-card">
+              <div className="stat-value" style={{ color: tester.vectorcast_ut_branch_rate >= 95 ? 'var(--color-success)' : 'var(--color-warning)' }}>
+                {tester.vectorcast_ut_branch_rate.toFixed(1)}%
+              </div>
+              <div className="stat-label">UT Branch Rate</div>
+            </div>
+          )}
+          {vc.metrics_avg_pct != null && (
+            <div className="stat-card">
+              <div className="stat-value">{vc.metrics_avg_pct.toFixed(1)}%</div>
+              <div className="stat-label">메트릭 평균</div>
             </div>
           )}
         </div>
-      )}
+      </div>
 
-      {/* Code Metrics */}
-      {codeMetrics && (
-        <div className="panel">
-          <div className="panel-header">
-            <span className="panel-title">📐 코드 메트릭</span>
-          </div>
-          <div className="stats-row">
-            {codeMetrics.code_files != null && (
-              <div className="stat-card">
-                <div className="stat-value">{codeMetrics.code_files.toLocaleString()}</div>
-                <div className="stat-label">코드 파일 수</div>
-              </div>
-            )}
-            {codeMetrics.functions != null && (
-              <div className="stat-card">
-                <div className="stat-value">{codeMetrics.functions.toLocaleString()}</div>
-                <div className="stat-label">함수 수</div>
-              </div>
-            )}
-            {codeMetrics.nloc != null && (
-              <div className="stat-card">
-                <div className="stat-value">{codeMetrics.nloc.toLocaleString()}</div>
-                <div className="stat-label">NLOC</div>
-              </div>
-            )}
-          </div>
+      {/* ── Code Metrics ── */}
+      <div className="panel" style={{ marginBottom: 12 }}>
+        <div className="panel-header"><span className="panel-title">코드 메트릭</span></div>
+        <div className="stats-row">
+          {cm.code_files != null && <div className="stat-card"><div className="stat-value">{cm.code_files}</div><div className="stat-label">소스 파일</div></div>}
+          {cm.functions != null && <div className="stat-card"><div className="stat-value">{cm.functions}</div><div className="stat-label">함수 수</div></div>}
+          {cm.nloc != null && <div className="stat-card"><div className="stat-value">{cm.nloc.toLocaleString()}</div><div className="stat-label">NLOC</div></div>}
+          {hmr.functions_total != null && <div className="stat-card"><div className="stat-value">{hmr.functions_total}</div><div className="stat-label">PRQA 분석 함수</div></div>}
         </div>
-      )}
+      </div>
 
-      {/* PRQA Detail */}
-      {prqa && (
-        <div className="panel">
-          <div className="panel-header">
-            <span className="panel-title">🔍 PRQA 상세</span>
+      {/* ── PRQA Detail ── */}
+      {prqa.rule_violation_count != null && (
+        <div className="panel" style={{ marginBottom: 12 }}>
+          <div className="panel-header"><span className="panel-title">PRQA 정적분석 상세</span></div>
+
+          {/* Compliance bar */}
+          {prqa.project_compliance_index != null && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="row" style={{ justifyContent: 'space-between', marginBottom: 4 }}>
+                <span className="text-sm" style={{ fontWeight: 600 }}>프로젝트 준수율</span>
+                <span style={{ fontWeight: 700, color: prqa.project_compliance_index >= 90 ? 'var(--color-success)' : 'var(--color-warning)' }}>
+                  {prqa.project_compliance_index}%
+                </span>
+              </div>
+              <div style={{ height: 8, borderRadius: 4, background: '#e5e7eb', overflow: 'hidden' }}>
+                <div style={{ width: `${prqa.project_compliance_index}%`, height: '100%', borderRadius: 4,
+                  background: prqa.project_compliance_index >= 90 ? 'var(--color-success)' : prqa.project_compliance_index >= 70 ? 'var(--color-warning)' : 'var(--color-danger)' }} />
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, marginBottom: 10 }}>
+            <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: prqa.rule_violation_count > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{prqa.rule_violation_count}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>위반 건수</div>
+            </div>
+            <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{prqa.violated_rules ?? '-'}<span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-muted)' }}>/{(prqa.violated_rules ?? 0) + (prqa.compliant_rules ?? 0)}</span></div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>위반/전체 규칙</div>
+            </div>
+            <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{prqa.file_compliance_index ?? '-'}%</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>파일 준수율</div>
+            </div>
+            <div style={{ textAlign: 'center', padding: 8, background: 'var(--bg)', borderRadius: 6 }}>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{prqa.diagnostic_count ?? '-'}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>진단 수</div>
+            </div>
           </div>
-          <div className="stats-row">
-            {prqa.rule_violation_count != null && (
-              <div className="stat-card">
-                <div className="stat-value" style={{ color: prqa.rule_violation_count > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>
-                  {prqa.rule_violation_count.toLocaleString()}
+
+          {/* HMR Complexity */}
+          {hmr.functions_total && (
+            <div style={{ padding: 10, background: 'var(--bg)', borderRadius: 6 }}>
+              <div className="text-sm" style={{ fontWeight: 600, marginBottom: 6 }}>HIS Metrics (복잡도)</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 16, fontWeight: 700 }}>{hmr.functions_total}</div>
+                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>분석 함수</div>
                 </div>
-                <div className="stat-label">규칙 위반 수</div>
-              </div>
-            )}
-            {prqa.diagnostic_count != null && (
-              <div className="stat-card">
-                <div className="stat-value">{prqa.diagnostic_count.toLocaleString()}</div>
-                <div className="stat-label">진단 수</div>
-              </div>
-            )}
-            {prqa.file_compliance_index != null && (
-              <div className="stat-card">
-                <div className="stat-value">{typeof prqa.file_compliance_index === 'number' ? prqa.file_compliance_index.toFixed(1) + '%' : prqa.file_compliance_index}</div>
-                <div className="stat-label">파일 준수 지수</div>
-              </div>
-            )}
-            {prqa.project_compliance_index != null && (
-              <div className="stat-card">
-                <div className="stat-value">{typeof prqa.project_compliance_index === 'number' ? prqa.project_compliance_index.toFixed(1) + '%' : prqa.project_compliance_index}</div>
-                <div className="stat-label">프로젝트 준수 지수</div>
-              </div>
-            )}
-          </div>
-
-          {/* Violated / Compliant rules */}
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', padding: '8px 12px' }}>
-            {prqa.violated_rules != null && (
-              <div>
-                <span className="text-sm text-muted">위반 규칙: </span>
-                {Array.isArray(prqa.violated_rules) ? (
-                  prqa.violated_rules.length > 0
-                    ? prqa.violated_rules.map((r, i) => <span key={i} className="pill" style={{ marginRight: 4, marginBottom: 2 }}>{r}</span>)
-                    : <span className="text-sm" style={{ color: 'var(--color-success)' }}>없음</span>
-                ) : (
-                  <span className="text-sm">{prqa.violated_rules}</span>
-                )}
-              </div>
-            )}
-            {prqa.compliant_rules != null && (
-              <div>
-                <span className="text-sm text-muted">준수 규칙: </span>
-                {Array.isArray(prqa.compliant_rules) ? (
-                  <span className="text-sm">{prqa.compliant_rules.length}개</span>
-                ) : (
-                  <span className="text-sm">{prqa.compliant_rules}</span>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* HMR Stats */}
-          {hmr && (
-            <div style={{ padding: '4px 12px 8px' }}>
-              <div className="text-sm text-muted" style={{ marginBottom: 4 }}>HMR 복잡도 통계</div>
-              <div className="stats-row">
-                {hmr.vg_max != null && (
-                  <div className="stat-card">
-                    <div className="stat-value">{hmr.vg_max}</div>
-                    <div className="stat-label">VG Max</div>
-                  </div>
-                )}
-                {hmr.vg_p95 != null && (
-                  <div className="stat-card">
-                    <div className="stat-value">{hmr.vg_p95}</div>
-                    <div className="stat-label">VG P95</div>
-                  </div>
-                )}
-                {hmr.vg_mean != null && (
-                  <div className="stat-card">
-                    <div className="stat-value">{typeof hmr.vg_mean === 'number' ? hmr.vg_mean.toFixed(1) : hmr.vg_mean}</div>
-                    <div className="stat-label">VG Mean</div>
-                  </div>
-                )}
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: hmr.vg_max > threshold ? 'var(--color-danger)' : 'var(--color-success)' }}>{hmr.vg_max}</div>
+                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG Max</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 16, fontWeight: 700 }}>{hmr.vg_p95}</div>
+                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG P95</div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ fontSize: 16, fontWeight: 700 }}>{hmr.vg_mean?.toFixed(1)}</div>
+                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>VG 평균</div>
+                </div>
               </div>
             </div>
           )}
         </div>
       )}
 
-      {/* VectorCAST Tester Summary */}
-      {tester && (
-        <div className="panel">
-          <div className="panel-header">
-            <span className="panel-title">🧪 VectorCAST 요약</span>
-          </div>
-          <div className="stats-row">
-            {tester.total != null && (
-              <div className="stat-card">
-                <div className="stat-value">{tester.total.toLocaleString()}</div>
-                <div className="stat-label">전체 테스트</div>
-              </div>
-            )}
-            {tester.passed != null && (
-              <div className="stat-card">
-                <div className="stat-value" style={{ color: 'var(--color-success)' }}>{tester.passed.toLocaleString()}</div>
-                <div className="stat-label">통과</div>
-              </div>
-            )}
-            {tester.failed != null && (
-              <div className="stat-card">
-                <div className="stat-value" style={{ color: tester.failed > 0 ? 'var(--color-danger)' : 'var(--color-success)' }}>{tester.failed.toLocaleString()}</div>
-                <div className="stat-label">실패</div>
-              </div>
-            )}
-            {tester.errors != null && (
-              <div className="stat-card">
-                <div className="stat-value" style={{ color: tester.errors > 0 ? 'var(--color-warning)' : 'var(--color-success)' }}>{tester.errors.toLocaleString()}</div>
-                <div className="stat-label">에러</div>
-              </div>
-            )}
-            {tester.pass_rate != null && (
-              <div className="stat-card">
-                <div className="stat-value">{typeof tester.pass_rate === 'number' ? tester.pass_rate.toFixed(1) + '%' : tester.pass_rate}</div>
-                <div className="stat-label">통과율</div>
-              </div>
-            )}
-          </div>
-          {tester.coverage != null && (
-            <div style={{ padding: '4px 12px 8px' }}>
-              <div className="text-sm text-muted">
-                커버리지: {typeof tester.coverage === 'number' ? tester.coverage.toFixed(1) + '%' : typeof tester.coverage === 'object' ? `Statement ${((tester.coverage.statement ?? tester.coverage.line_rate ?? 0) * 100).toFixed(1)}% / Branch ${((tester.coverage.branch ?? tester.coverage.branch_rate ?? 0) * 100).toFixed(1)}%` : tester.coverage}
-              </div>
-            </div>
-          )}
-          {tester.environments != null && (
-            <div style={{ padding: '0 12px 8px' }}>
-              <div className="text-sm text-muted">
-                환경: {Array.isArray(tester.environments) ? tester.environments.length + '개' : tester.environments}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Complexity */}
+      {/* ── Complexity Table ── */}
       <div className="panel">
         <div className="panel-header">
-          <span className="panel-title">📊 복잡도 분석</span>
+          <span className="panel-title">함수 복잡도 상세</span>
           <button className="btn-sm" onClick={loadComplexity} disabled={complexityLoading}>
             {complexityLoading ? <span className="spinner" /> : '불러오기'}
           </button>
         </div>
         {rows.length > 0 ? (
-          <table className="impact-table">
-            <thead>
-              <tr><th>함수</th><th>파일</th><th>복잡도</th></tr>
-            </thead>
-            <tbody>
-              {rows.slice(0, 30).map((r, i) => (
-                <tr key={i}>
-                  <td style={{ fontFamily: 'monospace', fontSize: 11 }}>{r.function ?? r.name ?? '-'}</td>
-                  <td className="text-sm" style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.file ?? r.path ?? '-'}</td>
-                  <td>
-                    <StatusBadge tone={(r.complexity ?? r.cc ?? 0) > threshold ? 'danger' : (r.complexity ?? r.cc ?? 0) > threshold * 0.7 ? 'warning' : 'success'}>
-                      {r.complexity ?? r.cc ?? '-'}
-                    </StatusBadge>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <div className="text-muted text-sm">불러오기 버튼을 클릭하세요.</div>
-        )}
-      </div>
-
-      {/* Docs */}
-      <div className="panel mt-3">
-        <div className="panel-header">
-          <span className="panel-title">📄 문서 목록</span>
-          <button className="btn-sm" onClick={loadDocs} disabled={docsLoading}>
-            {docsLoading ? <span className="spinner" /> : '불러오기'}
-          </button>
-        </div>
-        {docs ? (
-          docItems && docItems.length > 0 ? (
-            <table className="impact-table">
-              <thead>
-                <tr>
-                  <th>문서명</th>
-                  <th>유형</th>
-                  <th>상태</th>
-                </tr>
-              </thead>
-              <tbody>
-                {docItems.map((d, i) => {
-                  const name = typeof d === 'string' ? d : (d.name ?? d.title ?? d.filename ?? d.path ?? '-');
-                  const docType = typeof d === 'object' ? (d.type ?? d.category ?? '-') : '-';
-                  const status = typeof d === 'object' ? (d.status ?? d.state ?? null) : null;
-                  return (
-                    <tr key={i}>
-                      <td className="text-sm" style={{ fontFamily: 'monospace', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</td>
-                      <td><span className="pill">{docType}</span></td>
-                      <td>
-                        {status != null ? (
-                          <StatusBadge tone={status === 'ok' || status === 'pass' || status === 'approved' ? 'success' : status === 'fail' || status === 'rejected' ? 'danger' : 'neutral'}>
-                            {status}
-                          </StatusBadge>
-                        ) : (
-                          <span className="text-muted">-</span>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          ) : (
-            <div className="log-box" style={{ maxHeight: 300 }}>
-              {typeof docs === 'string' ? docs : JSON.stringify(docs, null, 2)}
+          <>
+            <div className="row" style={{ gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+              <input type="text" placeholder="함수명/파일 검색..." value={compFilter} onChange={e => setCompFilter(e.target.value)}
+                style={{ flex: 1, minWidth: 150, padding: '5px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }} />
+              <select value={compSort} onChange={e => setCompSort(e.target.value)}
+                style={{ padding: '5px 8px', fontSize: 12, border: '1px solid var(--border)', borderRadius: 6 }}>
+                <option value="complexity">복잡도 높은 순</option>
+                <option value="name">이름 순</option>
+              </select>
+              <span className="text-sm text-muted">{filteredRows.length}/{rows.length}건</span>
             </div>
-          )
+            <div style={{ maxHeight: 350, overflowY: 'auto' }}>
+              <table className="impact-table" style={{ fontSize: 10 }}>
+                <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
+                  <tr style={{ background: 'var(--bg)' }}><th>함수</th><th>파일</th><th>복잡도</th><th></th></tr>
+                </thead>
+                <tbody>
+                  {filteredRows.slice(0, 100).map((r, i) => {
+                    const cc = r.complexity ?? r.cc ?? 0;
+                    return (
+                      <tr key={i} style={{ background: cc > threshold ? '#fee2e2' : cc > threshold * 0.7 ? '#fef9c3' : undefined }}>
+                        <td style={{ fontFamily: 'monospace', fontSize: 10 }}>{r.function ?? r.name ?? '-'}</td>
+                        <td className="text-sm" style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.file ?? r.path ?? '-'}</td>
+                        <td style={{ textAlign: 'center' }}>
+                          <StatusBadge tone={cc > threshold ? 'danger' : cc > threshold * 0.7 ? 'warning' : 'success'}>{cc}</StatusBadge>
+                        </td>
+                        <td style={{ width: 60 }}>
+                          <div style={{ height: 6, borderRadius: 3, background: '#e5e7eb' }}>
+                            <div style={{ width: `${Math.min(cc / 30 * 100, 100)}%`, height: '100%', borderRadius: 3,
+                              background: cc > threshold ? 'var(--color-danger)' : cc > threshold * 0.7 ? 'var(--color-warning)' : 'var(--color-success)' }} />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            {filteredRows.length > 100 && <div className="text-muted text-sm" style={{ padding: 6, textAlign: 'center' }}>{filteredRows.length - 100}건 더 있음</div>}
+          </>
         ) : (
-          <div className="text-muted text-sm">불러오기 버튼을 클릭하세요.</div>
+          <div className="text-muted text-sm" style={{ padding: 12 }}>불러오기 버튼을 클릭하세요.</div>
         )}
       </div>
     </div>

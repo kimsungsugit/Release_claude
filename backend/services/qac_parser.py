@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional
 try:
     from bs4 import BeautifulSoup
 except ImportError:
-    BeautifulSoup = None
+    import subprocess, sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "beautifulsoup4", "-q"])
+    from bs4 import BeautifulSoup
 
 
 class MatrixItem(Enum):
@@ -195,6 +197,7 @@ class QACDataManager:
     dic_spec: Dict[MatrixItem, MatrixSpec] = field(default_factory=dict)
     dic_spec_over_count: Dict[MatrixItem, MatrixSpec] = field(default_factory=dict)
     list_result: List[HISItem] = field(default_factory=list)
+    parse_error: str = ""
     
     # 라인 번호 상수
     LINENO_TITLE_OLD = 112
@@ -275,11 +278,19 @@ class QACDataManager:
         except Exception:
             return False
         soup = BeautifulSoup(html, "html.parser")
-        title = (soup.title.string or "").strip() if soup.title else ""
-        if old_version and "PRQA HIS Metrics Report" not in title:
-            return False
-        if not old_version and "Helix QAC HIS Metrics Report" not in title:
-            return False
+        title = (soup.title.string or "").strip().lower() if soup.title else ""
+        if title:
+            if old_version and "prqa his metrics report" not in title:
+                return False
+            if not old_version and "helix qac his metrics report" not in title:
+                return False
+        else:
+            # Fallback: detect version from content patterns when title tag is missing
+            html_lower = html.lower()
+            if old_version and "prqa" not in html_lower:
+                return False
+            if not old_version and "helix" not in html_lower:
+                return False
         current_file = ""
         for tag in soup.find_all(["h3", "h4"]):
             text = tag.get_text(strip=True)
@@ -399,10 +410,19 @@ class QACDataManager:
             spec.clear(True)
 
 
-def parse_qac_report(filepath: Path, old_version: bool = False) -> QACDataManager:
+def parse_qac_report(filepath: Path, old_version: bool = None) -> QACDataManager:
     """QAC 리포트 파싱 메인 함수"""
     manager = QACDataManager()
+    if old_version is None:
+        # Auto-detect: try new version first, then old
+        if manager.read_file(False, filepath):
+            return manager
+        manager.clear()
+        if manager.read_file(True, filepath):
+            return manager
+        manager.parse_error = f"Failed to parse QAC report: {filepath}"
+        return manager
     if manager.read_file(old_version, filepath):
         return manager
-    else:
-        raise ValueError("Failed to parse QAC report")
+    manager.parse_error = f"Failed to parse QAC report: {filepath}"
+    return manager

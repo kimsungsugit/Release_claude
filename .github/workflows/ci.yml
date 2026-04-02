@@ -50,7 +50,37 @@ jobs:
           pip install pytest pytest-cov
           pip install -r requirements.txt || true
 
-      - name: Run unit tests
+      - name: Run unit tests with coverage
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m pytest tests/unit/ -q --tb=short --ignore=tests/unit/test_impact_jobs.py
+        run: |
+          python -m pytest tests/unit/ -q --tb=short \
+            --ignore=tests/unit/test_impact_jobs.py \
+            --cov=backend --cov=workflow --cov=report_gen --cov=generators \
+            --cov-report=term-missing --cov-report=html:htmlcov \
+            --cov-fail-under=40
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: htmlcov/
+
+  frontend-tests:
+    name: Frontend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: frontend-v2
+        run: npm ci
+
+      - name: Run Vitest
+        working-directory: frontend-v2
+        run: npm test

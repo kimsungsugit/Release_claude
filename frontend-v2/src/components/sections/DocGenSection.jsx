@@ -59,7 +59,6 @@ export default function DocGenSection({ job, analysisResult }) {
     setGenerating(docType);
     setGenLog(`${label} 생성 시작...\n`);
     setGenProgress(null);
-    setActiveTab(docType);
 
     try {
       // Get source_root and linked_docs from SCM registry
@@ -286,6 +285,112 @@ export default function DocGenSection({ job, analysisResult }) {
         )}
       </div>
 
+      {/* VectorCAST Export */}
+      <VectorCastExport job={job} analysisResult={analysisResult} cfg={cfg} cacheRoot={cacheRoot} />
+
+    </div>
+  );
+}
+
+/* ── VectorCAST Export Panel ── */
+function VectorCastExport({ job, analysisResult, cfg, cacheRoot }) {
+  const toast = useToast();
+  const [exporting, setExporting] = useState(null);
+  const [exportResult, setExportResult] = useState(null);
+  const scm = analysisResult?.scmList?.[0];
+
+  const exportVcast = useCallback(async (docType) => {
+    setExporting(docType);
+    setExportResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('job_url', job?.url || '');
+      formData.append('cache_root', cacheRoot);
+      formData.append('build_selector', cfg.buildSelector || 'lastSuccessfulBuild');
+      if (scm?.source_root) formData.append('source_root', scm.source_root);
+
+      // Find latest generated file
+      const qs = `job_url=${encodeURIComponent(job?.url || '')}&cache_root=${encodeURIComponent(cacheRoot)}`;
+      try {
+        const listData = await api(`/api/jenkins/${docType}/list?${qs}`);
+        const items = listData?.items || [];
+        if (items.length > 0) {
+          formData.append('filename', items[0].filename || items[0].name || '');
+        }
+      } catch (_) {}
+
+      const user = getUsername();
+      const endpoint = docType === 'sits' ? '/api/local/sits/export-vectorcast' : `/api/jenkins/${docType}/export-vectorcast`;
+      const res = await fetch(endpoint, {
+        method: 'POST', body: formData,
+        headers: user ? { 'X-User': user } : {},
+      });
+      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+      const data = await res.json();
+      setExportResult({ docType, ...data });
+      const summary = data?.manifest?.summary || {};
+      toast('success', `VectorCAST 패키지 생성: ${data.package_name || docType} (${summary.unit_count || 0} units, ${summary.test_case_count || 0} TCs)`);
+    } catch (e) {
+      toast('error', `VectorCAST 내보내기 실패: ${e.message}`);
+    } finally {
+      setExporting(null);
+    }
+  }, [job, cfg, cacheRoot, scm, toast]);
+
+  return (
+    <div className="panel" style={{ marginTop: 12 }}>
+      <div className="panel-header">
+        <span className="panel-title">VectorCAST 내보내기</span>
+      </div>
+      <div className="text-sm text-muted" style={{ marginBottom: 8 }}>
+        생성된 SUTS/SITS 문서를 VectorCAST .tst/.env 패키지로 변환합니다.
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button className="btn-primary btn-sm" onClick={() => exportVcast('suts')} disabled={!!exporting}>
+          {exporting === 'suts' ? '내보내기 중...' : '📙 SUTS → VectorCAST'}
+        </button>
+        <button className="btn-primary btn-sm" onClick={() => exportVcast('sits')} disabled={!!exporting}>
+          {exporting === 'sits' ? '내보내기 중...' : '📕 SITS → VectorCAST'}
+        </button>
+      </div>
+
+      {exportResult && (
+        <div style={{ marginTop: 10, padding: 10, background: 'var(--bg)', borderRadius: 6, border: '1px solid var(--border)' }}>
+          <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 6 }}>
+            <StatusBadge tone="success">생성 완료</StatusBadge>
+            <span style={{ fontWeight: 600, fontSize: 12 }}>{exportResult.package_name}</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
+            <div style={{ textAlign: 'center', padding: 6, background: 'var(--panel)', borderRadius: 4 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>{exportResult.manifest?.summary?.unit_count ?? '-'}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Units</div>
+            </div>
+            <div style={{ textAlign: 'center', padding: 6, background: 'var(--panel)', borderRadius: 4 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>{exportResult.manifest?.summary?.test_case_count ?? '-'}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Test Cases</div>
+            </div>
+            <div style={{ textAlign: 'center', padding: 6, background: 'var(--panel)', borderRadius: 4 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>{exportResult.manifest?.files_count ?? '-'}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Files</div>
+            </div>
+          </div>
+          {exportResult.readiness && (
+            <div className="row" style={{ gap: 6, fontSize: 11 }}>
+              <StatusBadge tone={exportResult.readiness.status === 'READY' ? 'success' : exportResult.readiness.status === 'PARTIALLY_READY' ? 'warning' : 'danger'}>
+                {exportResult.readiness.status}
+              </StatusBadge>
+              {exportResult.readiness.checks && exportResult.readiness.checks.filter(c => !c.ok).map((c, i) => (
+                <span key={i} className="pill pill-danger" style={{ fontSize: 9 }}>{c.name}</span>
+              ))}
+            </div>
+          )}
+          {exportResult.download_url && (
+            <a href={exportResult.download_url} download className="btn-sm" style={{ marginTop: 6, display: 'inline-block', textDecoration: 'none', color: 'var(--accent)' }}>
+              다운로드
+            </a>
+          )}
+        </div>
+      )}
     </div>
   );
 }

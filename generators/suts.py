@@ -2060,6 +2060,19 @@ def generate_suts(
     elapsed = time.time() - t0
     _progress(100, f"SUTS 생성 완료 ({elapsed:.1f}초)")
 
+    # Quality DB recording (non-fatal)
+    try:
+        from workflow.quality.recorder import record_run
+        record_run(
+            "suts", quality,
+            project_root=str(source_root or ""),
+            elapsed_sec=elapsed,
+            output_path=out,
+            ai_model=str((ai_config or {}).get("model", "")),
+        )
+    except Exception:
+        pass
+
     return {
         "output_path": out,
         "quality_report": quality,
